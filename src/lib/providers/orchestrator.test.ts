@@ -28,7 +28,13 @@ const provider: VehicleDataProvider = {
 
 async function cleanup() {
   const source = await db.dataSource.findUnique({ where: { key: SOURCE_KEY } });
-  if (source) await db.dataSource.delete({ where: { id: source.id } });
+  if (source) {
+    await db.vehicleEvent.deleteMany({ where: { sourceId: source.id } });
+    await db.vehicleAttribute.deleteMany({ where: { sourceId: source.id } });
+    await db.sourceLicense.deleteMany({ where: { sourceId: source.id } });
+    await db.providerRun.deleteMany({ where: { sourceId: source.id } });
+    await db.dataSource.delete({ where: { id: source.id } });
+  }
   await db.vehicle.deleteMany({ where: { vin: VIN } });
 }
 
