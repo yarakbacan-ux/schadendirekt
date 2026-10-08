@@ -32,9 +32,10 @@ describe('report coverage output', () => {
     expect(buildReportCoverage([provider], [outcome('FAILED', 'UPSTREAM_ERROR')], new Set())[0]?.state).toBe('ERROR');
   });
 
-  it('marks missing credentials or license as not configured', () => {
+  it('marks missing credentials, license or contract as not configured', () => {
     expect(buildReportCoverage([provider], [outcome('SKIPPED', 'CREDENTIALS_MISSING')], new Set())[0]?.state).toBe('NOT_CONFIGURED');
     expect(buildReportCoverage([provider], [outcome('SKIPPED', 'LICENSE_REQUIRED')], new Set())[0]?.state).toBe('NOT_CONFIGURED');
+    expect(buildReportCoverage([provider], [outcome('SKIPPED', 'CONTRACT_REQUIRED')], new Set())[0]?.state).toBe('NOT_CONFIGURED');
   });
 
   it('treats a fresh-cache skip as data only when persisted source data exists', () => {
