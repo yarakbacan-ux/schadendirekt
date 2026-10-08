@@ -2,7 +2,10 @@ import type { Prisma } from '@prisma/client';
 import { db } from '@/lib/db';
 import { findLicenseForAction, type LicenseLike } from '@/lib/license-policy';
 import { analyzeMileage } from '@/lib/mileage-analysis';
+import { analyzeAttributeConflict } from '@/lib/providers/conflicts';
 import { runVehicleProviders } from '@/lib/providers/orchestrator';
+import { buildReportCoverage } from '@/lib/report-coverage';
+import { getProvider } from '@/lib/providers/registry';
 import { NHTSA_SOURCE_KEY } from '@/lib/nhtsa';
 import { DVSA_SOURCE_KEY } from '@/lib/providers/dvsa-provider';
 import { isValidVin, normalizeVin } from '@/lib/vin';
@@ -38,6 +41,8 @@ type ReportInput = {
     quality: string;
     rawPayload: Prisma.JsonValue | null;
     importedAt: Date;
+    conflict?: boolean;
+    mappingVersion?: string | null;
     source: SourceInput;
   }>;
   attributes: Array<{
@@ -47,6 +52,8 @@ type ReportInput = {
     sourceField: string | null;
     quality: string;
     fetchedAt: Date;
+    conflict?: boolean;
+    mappingVersion?: string | null;
     source: SourceInput;
   }>;
 };
@@ -63,14 +70,6 @@ function sourceAllowed(source: SourceInput, now: Date) {
   return Boolean(findLicenseForAction(source.licenses, 'COMMERCIALIZE', now));
 }
 
-function compareAttributes(a: ReportInput['attributes'][number], b: ReportInput['attributes'][number]) {
-  const time = b.fetchedAt.getTime() - a.fetchedAt.getTime();
-  if (time !== 0) return time;
-  const source = a.source.key.localeCompare(b.source.key);
-  if (source !== 0) return source;
-  return a.id.localeCompare(b.id);
-}
-
 function selectedPublishableAttributes(input: ReportInput, now: Date) {
   const grouped = new Map<string, ReportInput['attributes']>();
   for (const attribute of input.attributes) {
@@ -81,11 +80,41 @@ function selectedPublishableAttributes(input: ReportInput, now: Date) {
   }
 
   const selected = new Map<string, ReportInput['attributes'][number]>();
+  const conflicts: Array<{
+    field: string;
+    candidates: Array<{ source: ReportSource; value: string; quality: string; fetchedAt: string; mappingVersion: string | null }>;
+  }> = [];
+
   for (const [field, candidates] of grouped) {
-    candidates.sort(compareAttributes);
-    if (candidates[0]) selected.set(field, candidates[0]);
+    const analysis = analyzeAttributeConflict(candidates.map((candidate) => ({
+      id: candidate.id,
+      sourceKey: candidate.source.key,
+      field: candidate.field,
+      value: candidate.value,
+      quality: candidate.quality,
+      fetchedAt: candidate.fetchedAt
+    })));
+    if (analysis.selected) {
+      const winner = candidates.find((candidate) => candidate.id === analysis.selected?.id);
+      if (winner) selected.set(field, winner);
+    }
+    if (analysis.conflict) {
+      conflicts.push({
+        field,
+        candidates: candidates
+          .slice()
+          .sort((a, b) => a.source.key.localeCompare(b.source.key) || a.id.localeCompare(b.id))
+          .map((candidate) => ({
+            source: { key: candidate.source.key, name: candidate.source.name },
+            value: candidate.value,
+            quality: candidate.quality,
+            fetchedAt: candidate.fetchedAt.toISOString(),
+            mappingVersion: candidate.mappingVersion ?? null
+          }))
+      });
+    }
   }
-  return selected;
+  return { selected, conflicts };
 }
 
 function reportAttributeValue(field: SpecField, value: string): string | number | null {
@@ -103,9 +132,10 @@ function eventDateSort(a: ReportInput['events'][number], b: ReportInput['events'
 }
 
 export function serializeVehicleReport(input: ReportInput, now = new Date()) {
-  const attributes = selectedPublishableAttributes(input, now);
+  const attributeSelection = selectedPublishableAttributes(input, now);
+  const attributes = attributeSelection.selected;
   const timeline = input.events
-    .filter((event) => sourceAllowed(event.source, now))
+    .filter((event) => sourceAllowed(event.source, now) && event.quality !== 'REJECTED')
     .sort(eventDateSort)
     .map((event) => ({
       id: event.id,
@@ -117,11 +147,13 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
       title: event.title,
       description: event.description,
       quality: event.quality,
+      conflict: event.conflict ?? false,
+      mappingVersion: event.mappingVersion ?? null,
       details: event.rawPayload,
       source: { key: event.source.key, name: event.source.name }
     }));
 
-  const provenance: Record<string, { source: ReportSource; sourceField: string | null; quality: string; fetchedAt: string; attributeId: string }> = {};
+  const provenance: Record<string, { source: ReportSource; sourceField: string | null; quality: string; fetchedAt: string; attributeId: string; conflict: boolean; mappingVersion: string | null }> = {};
   const vehicle: Record<string, string | number | null | Record<string, unknown>> = { vin: input.vin };
 
   for (const field of SPEC_FIELDS) {
@@ -143,7 +175,9 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
       sourceField: attribute.sourceField,
       quality: attribute.quality,
       fetchedAt: attribute.fetchedAt.toISOString(),
-      attributeId: attribute.id
+      attributeId: attribute.id,
+      conflict: attributeSelection.conflicts.some((item) => item.field === field),
+      mappingVersion: attribute.mappingVersion ?? null
     };
   }
   vehicle.provenance = provenance;
@@ -173,6 +207,7 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
     mileageAnalysis: mileage,
     damageEvents,
     inspectionEvents,
+    attributeConflicts: attributeSelection.conflicts,
     sources: [...sourceMap.values()],
     generatedAt: now.toISOString(),
     disclaimer: status === 'NO_DATA'
@@ -181,7 +216,7 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
   } as const;
 }
 
-export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?: boolean; hydrateDvsa?: boolean } = {}) {
+export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?: boolean; hydrateDvsa?: boolean; market?: string | null } = {}) {
   const vin = normalizeVin(rawVin);
   if (!isValidVin(vin)) throw new Error('INVALID_VIN');
 
@@ -190,11 +225,8 @@ export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?:
   if (options.hydrateDvsa !== false) providerKeys.push(DVSA_SOURCE_KEY);
 
   const outcomes = providerKeys.length > 0
-    ? await runVehicleProviders(vin, { origin: 'PUBLIC_LOOKUP', providerKeys })
+    ? await runVehicleProviders(vin, { origin: 'PUBLIC_LOOKUP', providerKeys, market: options.market ?? null })
     : [];
-  const providerIssues = outcomes
-    .filter((outcome) => outcome.status !== 'SUCCESS')
-    .map((outcome) => ({ providerKey: outcome.providerKey, status: outcome.status, errorCode: outcome.errorCode }));
 
   const vehicle = await db.vehicle.findUnique({
     where: { vin },
@@ -210,6 +242,15 @@ export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?:
     }
   });
 
+  const selectedProviders = providerKeys.map((key) => getProvider(key)).filter((provider): provider is NonNullable<typeof provider> => Boolean(provider));
+  const persistedSourceKeys = new Set<string>();
+  for (const attribute of vehicle?.attributes ?? []) persistedSourceKeys.add(attribute.source.key);
+  for (const event of vehicle?.events ?? []) persistedSourceKeys.add(event.source.key);
+  const coverage = buildReportCoverage(selectedProviders, outcomes, persistedSourceKeys);
+  const providerIssues = outcomes
+    .filter((outcome) => outcome.status === 'FAILED' || (outcome.status === 'SKIPPED' && outcome.decisionReason !== 'FRESH_DATA'))
+    .map((outcome) => ({ providerKey: outcome.providerKey, status: outcome.status, errorCode: outcome.errorCode ?? outcome.decisionReason ?? null }));
+
   if (!vehicle) {
     return {
       vin,
@@ -221,12 +262,14 @@ export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?:
       inspectionEvents: [],
       mileageAnalysis: { status: 'INSUFFICIENT_DATA' as const, readings: [], findings: [] },
       damageEvents: [],
+      attributeConflicts: [],
       sources: [],
+      coverage,
       providerIssues,
       generatedAt: new Date().toISOString(),
       disclaimer: 'Für diese FIN liegen derzeit keine veröffentlichbaren Daten vor. Das bedeutet nicht, dass das Fahrzeug unfallfrei ist oder der Kilometerstand korrekt ist.'
     };
   }
 
-  return { ...serializeVehicleReport(vehicle), providerIssues };
+  return { ...serializeVehicleReport(vehicle), coverage, providerIssues };
 }
