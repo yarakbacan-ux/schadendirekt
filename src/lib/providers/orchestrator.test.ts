@@ -12,6 +12,12 @@ const provider: VehicleDataProvider = {
   name: 'CI Provider',
   description: 'Test provider',
   capabilities: ['VEHICLE_SPECS', 'ODOMETER'],
+  authType: 'NONE',
+  refreshPolicy: 'Always for test',
+  rateLimitPolicy: 'None for test',
+  mappingVersion: 'ci-map-v1',
+  coverage: [{ marketCode: 'GLOBAL', capabilities: ['VEHICLE_SPECS', 'ODOMETER'], status: 'LIVE' }],
+  mapping: { brand: 'make', mileage: 'mileageKm' },
   async lookup() {
     return {
       cached: false,
@@ -28,13 +34,7 @@ const provider: VehicleDataProvider = {
 
 async function cleanup() {
   const source = await db.dataSource.findUnique({ where: { key: SOURCE_KEY } });
-  if (source) {
-    await db.vehicleEvent.deleteMany({ where: { sourceId: source.id } });
-    await db.vehicleAttribute.deleteMany({ where: { sourceId: source.id } });
-    await db.sourceLicense.deleteMany({ where: { sourceId: source.id } });
-    await db.providerRun.deleteMany({ where: { sourceId: source.id } });
-    await db.dataSource.delete({ where: { id: source.id } });
-  }
+  if (source) await db.dataSource.delete({ where: { id: source.id } });
   await db.vehicle.deleteMany({ where: { vin: VIN } });
 }
 
@@ -45,17 +45,22 @@ afterEach(async () => {
 describeDb('provider orchestrator persistence policy', () => {
   it('creates one canonical vehicle but blocks provider data storage without STORE rights', async () => {
     await cleanup();
-    await runVehicleProviders(VIN, { providers: [provider], origin: 'PUBLIC_LOOKUP' });
-    await runVehicleProviders(VIN, { providers: [provider], origin: 'PUBLIC_LOOKUP' });
+    const outcome = await runVehicleProviders(VIN, { providers: [provider], origin: 'PUBLIC_LOOKUP' });
+    expect(outcome[0]).toMatchObject({ status: 'SUCCESS', decision: 'DATA', mappingVersion: 'ci-map-v1' });
 
     expect(await db.vehicle.count({ where: { vin: VIN } })).toBe(1);
     const vehicle = await db.vehicle.findUniqueOrThrow({ where: { vin: VIN }, include: { attributes: true, events: true } });
     expect(vehicle.make).toBeNull();
     expect(vehicle.attributes).toHaveLength(0);
     expect(vehicle.events).toHaveLength(0);
+
+    const source = await db.dataSource.findUniqueOrThrow({ where: { key: SOURCE_KEY }, include: { coverages: true, mappings: true } });
+    expect(source.coverages).toHaveLength(1);
+    expect(source.coverages[0]).toMatchObject({ marketCode: 'GLOBAL', status: 'LIVE' });
+    expect(source.mappings[0]?.version).toBe('ci-map-v1');
   });
 
-  it('persists normalized attributes and events after an explicit storage license exists', async () => {
+  it('persists normalized attributes and events with their mapping version after explicit storage rights', async () => {
     await cleanup();
     await runVehicleProviders(VIN, { providers: [provider] });
     const source = await db.dataSource.findUniqueOrThrow({ where: { key: SOURCE_KEY } });
@@ -72,29 +77,26 @@ describeDb('provider orchestrator persistence policy', () => {
     });
 
     const outcome = await runVehicleProviders(VIN, { providers: [provider] });
-    expect(outcome[0]?.status).toBe('SUCCESS');
+    expect(outcome[0]).toMatchObject({ status: 'SUCCESS', decision: 'DATA', mappingVersion: 'ci-map-v1' });
 
     const vehicle = await db.vehicle.findUniqueOrThrow({ where: { vin: VIN }, include: { attributes: true, events: true } });
     expect(vehicle.make).toBe('BMW');
-    expect(vehicle.attributes).toHaveLength(1);
-    expect(vehicle.attributes[0]).toMatchObject({ field: 'make', value: 'BMW', sourceField: 'brand' });
-    expect(vehicle.events).toHaveLength(1);
-    expect(vehicle.events[0]).toMatchObject({ eventType: 'ODOMETER_READING', mileageKm: 12_345 });
+    expect(vehicle.attributes[0]).toMatchObject({ field: 'make', value: 'BMW', sourceField: 'brand', mappingVersion: 'ci-map-v1' });
+    expect(vehicle.events[0]).toMatchObject({ eventType: 'ODOMETER_READING', mileageKm: 12_345, mappingVersion: 'ci-map-v1' });
   });
 
   it('records provider failure without inventing history', async () => {
     await cleanup();
     const failing: VehicleDataProvider = {
       ...provider,
-      key: SOURCE_KEY,
       async lookup() { throw new Error('UPSTREAM_DOWN'); }
     };
 
     const outcome = await runVehicleProviders(VIN, { providers: [failing] });
-    expect(outcome[0]).toMatchObject({ status: 'FAILED', errorCode: 'UPSTREAM_DOWN' });
+    expect(outcome[0]).toMatchObject({ status: 'FAILED', decision: 'ERROR', errorCode: 'UPSTREAM_DOWN' });
     expect(await db.vehicleEvent.count({ where: { vehicle: { vin: VIN } } })).toBe(0);
     const source = await db.dataSource.findUniqueOrThrow({ where: { key: SOURCE_KEY } });
     const run = await db.providerRun.findFirstOrThrow({ where: { sourceId: source.id }, orderBy: { finishedAt: 'desc' } });
-    expect(run.status).toBe('FAILED');
+    expect(run).toMatchObject({ status: 'FAILED', decisionReason: 'PROVIDER_ERROR', mappingVersion: 'ci-map-v1' });
   });
 });
