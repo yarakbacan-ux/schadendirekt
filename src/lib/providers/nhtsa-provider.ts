@@ -6,6 +6,24 @@ export const nhtsaProvider: VehicleDataProvider = {
   name: 'NHTSA vPIC',
   description: 'NHTSA Product Information Catalog / Vehicle Listing. Stammdaten und VIN-Decoding, keine Unfallhistorie.',
   capabilities: ['VIN_DECODE', 'VEHICLE_SPECS'],
+  authType: 'NONE',
+  refreshPolicy: 'VIN-Decoding höchstens einmal pro 24 Stunden erneut live abrufen.',
+  rateLimitPolicy: 'Öffentliche Quelle; lokale Schonung und Cache verwenden.',
+  mappingVersion: 'nhtsa-vpic-v1',
+  coverage: [
+    {
+      marketCode: 'GLOBAL',
+      capabilities: ['VIN_DECODE', 'VEHICLE_SPECS'],
+      status: 'PARTIAL',
+      requiresCredentials: false,
+      requiresContract: false,
+      requiresLicense: false,
+      freshnessHours: 24,
+      qualityNote: 'VIN-Decoding kann je Hersteller/Markt unvollständig sein. Dies ist keine Historienabdeckung.',
+      notes: 'GLOBAL bedeutet hier ausschließlich technische VIN-/Stammdatenabfrage, nicht Schaden-, Service- oder Kilometerhistorie.'
+    }
+  ],
+  mapping: Object.fromEntries(Object.entries(NHTSA_FIELD_SOURCES)),
   async lookup(vin) {
     const decoded = await decodeVinWithNhtsa(vin);
     const fetchedAt = new Date();
