@@ -43,7 +43,7 @@ describe('DVSA access-token cache', () => {
         signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
       });
     });
-    const sleep = vi.fn(async () => undefined);
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
     const getToken = createDvsaTokenProvider({ fetchImpl: fetchImpl as typeof fetch, timeoutMs: 5, maxRetries: 1, sleep });
 
     await expect(getToken(config)).rejects.toThrow('DVSA_TOKEN_TIMEOUT');
@@ -56,7 +56,7 @@ describe('DVSA access-token cache', () => {
       .mockResolvedValueOnce(new Response('', { status: 429, headers: { 'retry-after': '0' } }))
       .mockResolvedValueOnce(new Response('', { status: 503 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: 'token-after-retry', expires_in: 120 }), { status: 200 }));
-    const sleep = vi.fn(async () => undefined);
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
     const getToken = createDvsaTokenProvider({ fetchImpl, maxRetries: 2, baseRetryDelayMs: 1, sleep });
 
     await expect(getToken(config)).resolves.toBe('token-after-retry');
@@ -67,7 +67,7 @@ describe('DVSA access-token cache', () => {
 
   it.each([400, 401])('does not retry permanent credential HTTP %s errors', async (status) => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('', { status }));
-    const sleep = vi.fn(async () => undefined);
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
     const getToken = createDvsaTokenProvider({ fetchImpl, maxRetries: 3, sleep });
 
     await expect(getToken(config)).rejects.toThrow(`DVSA_TOKEN_HTTP_${status}`);
