@@ -275,7 +275,10 @@ async function hydrateReportProviders(
   const explicitMarketSupplied = Object.prototype.hasOwnProperty.call(options, 'market');
   const explicitMarket = explicitMarketSupplied ? normalizeMarket(options.market) : null;
   const storedMarket = explicitMarketSupplied ? null : await reliableStoredMarket(vin);
-  const initialMarket = explicitMarketSupplied ? explicitMarket : storedMarket;
+  // Empty string deliberately means "known to be unknown" to the orchestrator.
+  // This prevents fallback to Vehicle.market unless that canonical value has
+  // provenance accepted by reliableStoredMarket().
+  const initialMarket = explicitMarketSupplied ? (explicitMarket ?? '') : (storedMarket ?? '');
 
   const initial = await runVehicleProviders(vin, {
     origin: 'PUBLIC_LOOKUP',
