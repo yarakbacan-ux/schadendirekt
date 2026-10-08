@@ -4,11 +4,13 @@ import { mergeProviderResults } from '@/lib/providers/orchestrator';
 import type { ProviderOutcome } from '@/lib/providers/types';
 
 describe('provider registry', () => {
-  it('registers NHTSA for VIN decode and vehicle specs', () => {
-    expect(listProviders().map((provider) => provider.key)).toContain('nhtsa-vpic');
+  it('registers NHTSA and DVSA with distinct capabilities', () => {
+    expect(listProviders().map((provider) => provider.key)).toEqual(expect.arrayContaining(['nhtsa-vpic', 'dvsa-mot']));
     expect(getProvider('nhtsa-vpic')?.capabilities).toEqual(expect.arrayContaining(['VIN_DECODE', 'VEHICLE_SPECS']));
+    expect(getProvider('dvsa-mot')?.capabilities).toEqual(expect.arrayContaining(['INSPECTION', 'ODOMETER', 'REGISTRATION']));
     expect(getProvidersForCapability('VIN_DECODE').map((provider) => provider.key)).toContain('nhtsa-vpic');
-    expect(getProvidersForCapability('DAMAGE').map((provider) => provider.key)).not.toContain('nhtsa-vpic');
+    expect(getProvidersForCapability('INSPECTION').map((provider) => provider.key)).toContain('dvsa-mot');
+    expect(getProvidersForCapability('DAMAGE').map((provider) => provider.key)).not.toContain('dvsa-mot');
   });
 });
 
