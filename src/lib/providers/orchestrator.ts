@@ -1,6 +1,6 @@
 import { Prisma, type VehicleOrigin } from '@prisma/client';
 import { db } from '@/lib/db';
-import { findLicenseForAction } from '@/lib/license-policy';
+import { findLicenseForAction, retentionExpiry, type LicenseLike } from '@/lib/license-policy';
 import { selectProviders } from '@/lib/providers/registry';
 import type {
   ProviderAttribute,
@@ -46,8 +46,10 @@ function canonicalVehicleData(attributes: ProviderAttribute[]): Prisma.VehicleUp
 async function persistProviderResult(
   vehicleId: string,
   sourceId: string,
-  result: ProviderLookupResult
+  result: ProviderLookupResult,
+  storageLicense: LicenseLike
 ) {
+  const rawExpiresAt = retentionExpiry(storageLicense);
   const attributeWrites = result.attributes.map((attribute) => db.vehicleAttribute.upsert({
     where: { vehicleId_sourceId_field: { vehicleId, sourceId, field: attribute.field } },
     update: {
@@ -81,7 +83,8 @@ async function persistProviderResult(
       title: event.title,
       description: event.description ?? null,
       quality: event.quality,
-      rawPayload: event.rawPayload ? event.rawPayload as Prisma.InputJsonValue : undefined
+      rawPayload: event.rawPayload ? event.rawPayload as Prisma.InputJsonValue : Prisma.DbNull,
+      rawPayloadExpiresAt: event.rawPayload ? rawExpiresAt : null
     },
     create: {
       vehicleId,
@@ -95,7 +98,8 @@ async function persistProviderResult(
       title: event.title,
       description: event.description ?? null,
       quality: event.quality,
-      rawPayload: event.rawPayload ? event.rawPayload as Prisma.InputJsonValue : undefined
+      rawPayload: event.rawPayload ? event.rawPayload as Prisma.InputJsonValue : undefined,
+      rawPayloadExpiresAt: event.rawPayload ? rawExpiresAt : null
     }
   }));
 
@@ -110,6 +114,9 @@ async function persistProviderResult(
 }
 
 function errorCode(error: unknown): string {
+  if (error && typeof error === 'object' && 'code' in error && typeof (error as { code?: unknown }).code === 'string') {
+    return (error as { code: string }).code.slice(0, 160);
+  }
   if (error instanceof Error && error.message) return error.message.slice(0, 160);
   return 'PROVIDER_FAILED';
 }
@@ -126,6 +133,21 @@ export function mergeProviderResults(outcomes: ProviderOutcome[]) {
       return date || a.providerKey.localeCompare(b.providerKey) || a.externalId.localeCompare(b.externalId);
     });
   return { attributes, events };
+}
+
+async function recordSkipped(sourceId: string, vin: string, startedAt: Date, startedMs: number, reason: string) {
+  await db.providerRun.create({
+    data: {
+      sourceId,
+      vin,
+      status: 'SKIPPED',
+      cached: false,
+      durationMs: Date.now() - startedMs,
+      errorCode: reason,
+      startedAt,
+      finishedAt: new Date()
+    }
+  });
 }
 
 export async function runVehicleProviders(
@@ -157,27 +179,22 @@ export async function runVehicleProviders(
     const startedMs = Date.now();
 
     if (!source.active) {
-      const finishedAt = new Date();
-      await db.providerRun.create({
-        data: {
-          sourceId: source.id,
-          vin,
-          status: 'SKIPPED',
-          cached: false,
-          durationMs: Date.now() - startedMs,
-          errorCode: 'SOURCE_INACTIVE',
-          startedAt,
-          finishedAt
-        }
-      });
+      await recordSkipped(source.id, vin, startedAt, startedMs, 'SOURCE_INACTIVE');
       outcomes.push({ providerKey: provider.key, status: 'SKIPPED', cached: false, attributes: [], events: [], errorCode: 'SOURCE_INACTIVE' });
+      continue;
+    }
+
+    const configuration = provider.configurationStatus?.();
+    if (configuration && !configuration.configured) {
+      await recordSkipped(source.id, vin, startedAt, startedMs, 'CREDENTIALS_MISSING');
+      outcomes.push({ providerKey: provider.key, status: 'SKIPPED', cached: false, attributes: [], events: [], errorCode: 'CREDENTIALS_MISSING' });
       continue;
     }
 
     const storeLicense = findLicenseForAction(source.licenses, 'STORE');
     try {
       const result = await provider.lookup(vin, { canStore: Boolean(storeLicense), now: startedAt });
-      if (storeLicense) await persistProviderResult(vehicle.id, source.id, result);
+      if (storeLicense) await persistProviderResult(vehicle.id, source.id, result, storeLicense);
 
       const finishedAt = new Date();
       await db.providerRun.create({
