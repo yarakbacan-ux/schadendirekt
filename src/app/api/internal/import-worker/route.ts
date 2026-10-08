@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { processPendingImportJobs } from '@/lib/imports';
+import { processPendingImportJobsUnified } from '@/lib/dvsa-bulk-import';
 import { requestId, unexpectedApiError } from '@/lib/api-errors';
 
 export async function POST(request: Request) {
@@ -11,7 +11,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'UNAUTHORIZED', requestId: id }, { status: 401, headers: { 'x-request-id': id } });
     }
 
-    const results = await processPendingImportJobs(2, 250);
+    const results = await processPendingImportJobsUnified(2, 2, 250);
     return NextResponse.json(
       {
         processed: results.map((job) => ({
