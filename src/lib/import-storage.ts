@@ -1,5 +1,5 @@
 import { createReadStream, promises as fs } from 'node:fs';
-import { dirname, join, normalize } from 'node:path';
+import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Readable } from 'node:stream';
 
@@ -19,9 +19,11 @@ export interface ImportStorage {
 
 function safePath(root: string, key: string): string {
   const normalizedKey = normalize(key).replace(/^([/\\])+/, '');
-  const absolute = join(root, normalizedKey);
-  const normalizedRoot = join(root, '.').slice(0, -1);
-  if (!absolute.startsWith(normalizedRoot)) throw new Error('INVALID_STORAGE_KEY');
+  const absoluteRoot = resolve(root);
+  const absolute = resolve(absoluteRoot, normalizedKey);
+  if (absolute !== absoluteRoot && !absolute.startsWith(`${absoluteRoot}${sep}`)) {
+    throw new Error('INVALID_STORAGE_KEY');
+  }
   return absolute;
 }
 
