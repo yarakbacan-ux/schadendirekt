@@ -7,15 +7,18 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; background: linear-gradient(180deg, #0b0d10 0%, #11161d 100%); min-height: 100vh; }
-button, input { font: inherit; }
-.shell { width: min(960px, calc(100% - 32px)); margin: 0 auto; padding: 72px 0; }
+a { color: #8fc5ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+button, input, select { font: inherit; }
+.shell { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 72px 0; }
 .hero { padding: 48px; border: 1px solid #232b35; border-radius: 24px; background: rgba(17, 22, 29, .88); box-shadow: 0 30px 80px rgba(0,0,0,.25); }
 .eyebrow { display: inline-block; margin-bottom: 12px; font-weight: 700; letter-spacing: .12em; font-size: 12px; color: #8fc5ff; }
 h1 { margin: 0 0 16px; font-size: clamp(36px, 6vw, 64px); line-height: 1; max-width: 800px; }
 p { color: #b6c0cb; line-height: 1.65; }
 .searchForm { display: grid; grid-template-columns: 1fr auto; gap: 12px; margin-top: 28px; }
-.searchForm input { min-width: 0; padding: 16px 18px; border-radius: 14px; border: 1px solid #2d3743; background: #0d1117; color: white; text-transform: uppercase; letter-spacing: .08em; }
-.searchForm button { padding: 16px 22px; border: 0; border-radius: 14px; font-weight: 700; cursor: pointer; background: white; color: #0b0d10; }
+.searchForm input, .adminFilters input, .adminFilters select { min-width: 0; padding: 16px 18px; border-radius: 14px; border: 1px solid #2d3743; background: #0d1117; color: white; }
+.searchForm input { text-transform: uppercase; letter-spacing: .08em; }
+.searchForm button, .adminFilters button { padding: 16px 22px; border: 0; border-radius: 14px; font-weight: 700; cursor: pointer; background: white; color: #0b0d10; }
 .searchForm button:disabled { opacity: .65; cursor: wait; }
 .resultCard { margin-top: 24px; padding: 32px; border: 1px solid #232b35; border-radius: 20px; background: #11161d; }
 .resultCard h2 { margin-top: 0; }
@@ -23,8 +26,60 @@ p { color: #b6c0cb; line-height: 1.65; }
 .timeline article { padding: 18px; border-radius: 14px; border: 1px solid #25303b; background: #0d1117; }
 .timeline article > span { display: block; margin-top: 6px; color: #8fa0b2; font-size: 14px; }
 .timeline small { color: #7f8c99; }
+.reportLink { display: inline-flex; margin-top: 18px; padding: 12px 16px; border-radius: 12px; border: 1px solid #36516d; background: #101a25; font-weight: 700; }
+.reportHero { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.reportHero h1 { font-size: clamp(32px, 5vw, 54px); }
+.vinLine { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+.noticeBox { margin-top: 20px; padding: 18px 22px; border-radius: 16px; border: 1px solid #314052; background: #101720; }
+.noticeBox p { margin-bottom: 0; }
+.reportGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.reportPanel { min-width: 0; }
+.specGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.specItem { padding: 16px; border-radius: 14px; background: #0d1117; border: 1px solid #25303b; }
+.specItem span, .specItem small { display: block; color: #8391a0; font-size: 12px; }
+.specItem strong { display: block; margin: 6px 0; word-break: break-word; }
+.statusBadge { display: inline-flex; width: fit-content; padding: 8px 11px; border-radius: 999px; border: 1px solid #314052; background: #0d1117; font-size: 12px; font-weight: 800; letter-spacing: .04em; }
+.status-ok { border-color: #2f6247; }
+.status-notice { border-color: #745e2e; }
+.status-suspicious { border-color: #7b3540; }
+.status-insufficient_data { border-color: #485461; }
+.mileageChart { margin-top: 20px; padding: 18px; border-radius: 16px; background: #0d1117; border: 1px solid #25303b; color: #8fc5ff; }
+.mileageChart svg { width: 100%; height: 190px; overflow: visible; }
+.chartLegend { display: flex; justify-content: space-between; color: #8fa0b2; font-size: 12px; }
+.findingList { display: grid; gap: 10px; margin-top: 16px; }
+.finding { padding: 14px; border-radius: 12px; border: 1px solid #3a4654; background: #0c1117; }
+.finding p { margin: 6px 0; }
+.finding small { color: #8391a0; }
+.finding-suspicious { border-color: #7b3540; }
+.finding-notice { border-color: #745e2e; }
+.sourceList { display: grid; gap: 10px; padding: 0; list-style: none; }
+.sourceList li { display: flex; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid #25303b; border-radius: 12px; background: #0d1117; }
+.sourceList span { color: #8391a0; font-family: ui-monospace, monospace; }
+.reportFooterActions { display: flex; justify-content: space-between; gap: 16px; margin-top: 24px; color: #8391a0; font-size: 14px; }
+.adminStats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 24px; }
+.adminStats div { padding: 20px; border: 1px solid #25303b; border-radius: 16px; background: #11161d; }
+.adminStats strong, .adminStats span { display: block; }
+.adminStats strong { font-size: 28px; }
+.adminStats span { margin-top: 4px; color: #8391a0; font-size: 13px; }
+.adminFilters { display: grid; grid-template-columns: 1.2fr repeat(3, 1fr) auto; gap: 10px; }
+.adminFilters select { text-transform: none; letter-spacing: 0; }
+.adminTableWrap { overflow-x: auto; }
+.adminTable { width: 100%; border-collapse: collapse; font-size: 14px; }
+.adminTable th, .adminTable td { padding: 13px 10px; border-bottom: 1px solid #25303b; text-align: left; vertical-align: top; }
+.adminTable th { color: #8391a0; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+.adminTable code { white-space: nowrap; color: #cfe7ff; }
+
+@media (max-width: 900px) {
+  .reportGrid, .adminStats { grid-template-columns: 1fr 1fr; }
+  .adminFilters { grid-template-columns: 1fr 1fr; }
+  .adminFilters button { grid-column: 1 / -1; }
+}
+
 @media (max-width: 680px) {
   .shell { padding-top: 24px; }
   .hero { padding: 28px 20px; }
-  .searchForm { grid-template-columns: 1fr; }
+  .searchForm, .reportGrid, .adminStats, .adminFilters, .specGrid { grid-template-columns: 1fr; }
+  .reportHero, .reportFooterActions { flex-direction: column; }
+  .resultCard { padding: 22px 18px; }
+  .sourceList li { flex-direction: column; }
 }

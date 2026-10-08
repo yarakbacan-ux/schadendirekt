@@ -1,9 +1,8 @@
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/db';
 import { isValidVin, normalizeVin } from '@/lib/vin';
-import { findLicenseForAction } from '@/lib/license-policy';
 import { requestId, unexpectedApiError } from '@/lib/api-errors';
 import { rateLimit } from '@/lib/rate-limit';
+import { getVehicleReport } from '@/lib/report';
 
 export async function GET(request: Request, context: { params: Promise<{ vin: string }> }) {
   const id = requestId(request);
@@ -26,50 +25,10 @@ export async function GET(request: Request, context: { params: Promise<{ vin: st
       );
     }
 
-    const vehicle = await db.vehicle.findUnique({
-      where: { vin },
-      include: {
-        events: {
-          include: { source: { include: { licenses: true } } },
-          orderBy: [{ eventDate: 'desc' }, { importedAt: 'desc' }]
-        }
-      }
-    });
-
-    if (!vehicle) {
-      return NextResponse.json(
-        { vin, found: false, status: 'NO_DATA', events: [], requestId: id },
-        { headers: { 'x-request-id': id } }
-      );
-    }
-
-    const now = new Date();
-    const publishable = vehicle.events.filter((event) =>
-      Boolean(findLicenseForAction(event.source.licenses, 'COMMERCIALIZE', now))
-    );
-
+    const report = await getVehicleReport(vin, { hydrateNhtsa: true });
     return NextResponse.json(
-      {
-        vin,
-        found: true,
-        status: publishable.length > 0 ? 'DATA_AVAILABLE' : 'NO_DATA',
-        disclaimer: publishable.length === 0
-          ? 'Für diese FIN liegen derzeit keine veröffentlichbaren Daten vor. Das bedeutet nicht, dass das Fahrzeug unfallfrei ist.'
-          : undefined,
-        events: publishable.map((event) => ({
-          id: event.id,
-          type: event.eventType,
-          date: event.eventDate,
-          country: event.country,
-          mileageKm: event.mileageKm,
-          title: event.title,
-          description: event.description,
-          quality: event.quality,
-          source: { key: event.source.key, name: event.source.name }
-        })),
-        requestId: id
-      },
-      { headers: { 'x-request-id': id } }
+      { ...report, requestId: id },
+      { headers: { 'x-request-id': id, 'cache-control': 'private, max-age=60' } }
     );
   } catch (error) {
     return unexpectedApiError(error, id, 503);
