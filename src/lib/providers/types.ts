@@ -28,6 +28,7 @@ export type ProviderCoverageDefinition = {
   qualityNote?: string | null;
   allowUnknownMarket?: boolean;
   freshnessSeconds?: number | null;
+  mappingVersion?: string | null;
 };
 
 export type ProviderRefreshPolicy = {
@@ -67,6 +68,7 @@ export type ProviderLookupContext = {
   canStore: boolean;
   now: Date;
   market: string | null;
+  capabilities: readonly ProviderCapability[];
 };
 
 export type ProviderLookupResult = {
@@ -101,12 +103,16 @@ export type ProviderOutcomeStatus = 'SUCCESS' | 'NO_DATA' | 'FAILED' | 'SKIPPED'
 
 export type ProviderOutcome = {
   providerKey: string;
+  providerName?: string;
   status: ProviderOutcomeStatus;
   cached: boolean;
+  persisted?: boolean;
   attributes: ProviderAttribute[];
   events: ProviderEvent[];
   errorCode: string | null;
   decisionReason?: string | null;
   market?: string | null;
   mappingVersion?: string | null;
+  capabilities?: readonly ProviderCapability[];
+  retryAfterSeconds?: number | null;
 };
