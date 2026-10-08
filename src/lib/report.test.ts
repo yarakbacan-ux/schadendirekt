@@ -32,11 +32,11 @@ function baseVehicle() {
     market: null,
     attributes: [
       {
-        field: 'make', value: 'BMW', sourceField: 'Make', quality: 'VERIFIED', fetchedAt: new Date('2026-01-01'),
+        id: 'attr-make-nhtsa', field: 'make', value: 'BMW', sourceField: 'Make', quality: 'VERIFIED', fetchedAt: new Date('2026-01-01'),
         source: { key: 'nhtsa-vpic', name: 'NHTSA vPIC', licenses: [allowedLicense] }
       },
       {
-        field: 'model', value: 'X5', sourceField: 'Model', quality: 'VERIFIED', fetchedAt: new Date('2026-01-01'),
+        id: 'attr-model-nhtsa', field: 'model', value: 'X5', sourceField: 'Model', quality: 'VERIFIED', fetchedAt: new Date('2026-01-01'),
         source: { key: 'nhtsa-vpic', name: 'NHTSA vPIC', licenses: [allowedLicense] }
       }
     ],
@@ -70,5 +70,54 @@ describe('serializeVehicleReport', () => {
     input.attributes = input.attributes.filter((attribute) => attribute.field !== 'model');
     const report = serializeVehicleReport(input, new Date('2026-02-01T00:00:00Z'));
     expect(report.vehicle.model).toBeNull();
+  });
+
+  it('emits value and provenance from the same deterministically selected attribute', () => {
+    const input = baseVehicle();
+    input.make = 'CANONICAL-OLD';
+    input.attributes.push({
+      id: 'attr-make-source-b',
+      field: 'make',
+      value: 'AUDI',
+      sourceField: 'brand_name',
+      quality: 'VERIFIED',
+      fetchedAt: new Date('2026-02-01T00:00:00Z'),
+      source: { key: 'source-b', name: 'Source B', licenses: [allowedLicense] }
+    });
+    input.attributes.push({
+      id: 'attr-make-source-a',
+      field: 'make',
+      value: 'MERCEDES-BENZ',
+      sourceField: 'manufacturer_name',
+      quality: 'VERIFIED',
+      fetchedAt: new Date('2026-02-01T00:00:00Z'),
+      source: { key: 'source-a', name: 'Source A', licenses: [allowedLicense] }
+    });
+
+    const report = serializeVehicleReport(input, new Date('2026-02-02T00:00:00Z'));
+    expect(report.vehicle.make).toBe('MERCEDES-BENZ');
+    expect(report.vehicle.provenance).toMatchObject({
+      make: {
+        attributeId: 'attr-make-source-a',
+        source: { key: 'source-a', name: 'Source A' },
+        sourceField: 'manufacturer_name',
+        quality: 'VERIFIED'
+      }
+    });
+  });
+
+  it('never publishes the value of an unlicensed newer attribute', () => {
+    const input = baseVehicle();
+    input.attributes.push({
+      id: 'blocked-newer',
+      field: 'make',
+      value: 'BLOCKED-BRAND',
+      sourceField: 'Make',
+      quality: 'VERIFIED',
+      fetchedAt: new Date('2026-03-01'),
+      source: { key: 'blocked-source', name: 'Blocked source', licenses: [blockedLicense] }
+    });
+    const report = serializeVehicleReport(input, new Date('2026-03-02T00:00:00Z'));
+    expect(report.vehicle.make).toBe('BMW');
   });
 });
