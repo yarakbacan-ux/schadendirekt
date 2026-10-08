@@ -1,7 +1,26 @@
+import { Readable } from 'node:stream';
 import { NextResponse } from 'next/server';
-import { queueImport } from '@/lib/imports';
+import { queueImportStream } from '@/lib/imports';
 import { requestId, unexpectedApiError } from '@/lib/api-errors';
 import { requireRequestRole, verifyCsrf } from '@/lib/auth';
+
+export const runtime = 'nodejs';
+
+function requestBodyStream(request: Request): Readable {
+  if (!request.body) throw new Error('EMPTY_IMPORT_BODY');
+  const reader = request.body.getReader();
+  return Readable.from((async function* () {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) yield value;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  })());
+}
 
 export async function POST(request: Request) {
   const id = requestId(request);
@@ -19,14 +38,13 @@ export async function POST(request: Request) {
     const format = contentType.includes('application/json') ? 'JSON' : contentType.includes('text/csv') ? 'CSV' : null;
     if (!format) return NextResponse.json({ error: 'UNSUPPORTED_MEDIA_TYPE', requestId: id }, { status: 415, headers: { 'x-request-id': id } });
 
-    const raw = await request.text();
-    const job = await queueImport(
+    const job = await queueImportStream(
       sourceKey,
-      raw,
+      requestBodyStream(request),
       format,
-      undefined,
       request.headers.get('x-file-name') ?? undefined,
-      request.headers.get('x-mapping-version') ?? undefined
+      request.headers.get('x-mapping-version') ?? undefined,
+      request.headers.get('x-content-sha256') ?? undefined
     );
     return NextResponse.json(
       {
@@ -40,7 +58,7 @@ export async function POST(request: Request) {
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : 'IMPORT_QUEUE_FAILED';
-    if (message === 'INVALID_MAPPING_VERSION') {
+    if (message === 'INVALID_MAPPING_VERSION' || message === 'EMPTY_IMPORT_BODY' || message === 'CHECKSUM_MISMATCH') {
       return NextResponse.json({ error: message, requestId: id }, { status: 400, headers: { 'x-request-id': id } });
     }
     if (message.includes('LICENSED') || message.includes('RETENTION')) {
