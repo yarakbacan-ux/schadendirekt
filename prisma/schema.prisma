@@ -40,9 +40,17 @@ enum VehicleEventType {
   OTHER
 }
 
+enum VehicleOrigin {
+  PUBLIC_LOOKUP
+  ADMIN_IMPORT
+  REPORT_PURCHASE
+  SYSTEM
+}
+
 model Vehicle {
   id                 String             @id @default(cuid())
   vin                String             @unique @db.VarChar(17)
+  origin             VehicleOrigin      @default(SYSTEM)
   make               String?
   model              String?
   modelYear          Int?
@@ -61,6 +69,7 @@ model Vehicle {
   attributes         VehicleAttribute[]
 
   @@index([vin])
+  @@index([origin])
 }
 
 model VehicleEvent {
@@ -193,6 +202,7 @@ model SourceLicense {
   canCommercialize     Boolean    @default(false)
   retentionDays        Int?
   notes                String?
+  reviewedBy           String?
   validFrom            DateTime?
   validUntil           DateTime?
   reviewedAt           DateTime?

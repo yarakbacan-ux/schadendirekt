@@ -1,7 +1,8 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, type VehicleOrigin } from '@prisma/client';
 import { db } from '@/lib/db';
 import { isValidVin, normalizeVin } from '@/lib/vin';
 import { rateLimit } from '@/lib/rate-limit';
+import { findLicenseForAction } from '@/lib/license-policy';
 
 export const NHTSA_SOURCE_KEY = 'nhtsa-vpic';
 export const NHTSA_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -77,12 +78,11 @@ function hasDecodedValues(mapped: NhtsaMappedSpecs): boolean {
   return Object.values(mapped).some((value) => value !== undefined && value !== null && value !== '');
 }
 
-async function ensureNhtsaSource() {
-  const source = await db.dataSource.upsert({
+export async function ensureNhtsaSource() {
+  return db.dataSource.upsert({
     where: { key: NHTSA_SOURCE_KEY },
     update: {
       name: 'NHTSA vPIC',
-      active: true,
       description: 'NHTSA Product Information Catalog / Vehicle Listing. Technische Identifikations- und Stammdaten, keine Unfallhistorie.'
     },
     create: {
@@ -90,30 +90,9 @@ async function ensureNhtsaSource() {
       name: 'NHTSA vPIC',
       active: true,
       description: 'NHTSA Product Information Catalog / Vehicle Listing. Technische Identifikations- und Stammdaten, keine Unfallhistorie.'
-    }
+    },
+    include: { licenses: true }
   });
-
-  const existingLicense = await db.sourceLicense.findFirst({
-    where: { sourceId: source.id, licenseName: 'NHTSA Open Data / vPIC public API' }
-  });
-
-  if (!existingLicense) {
-    await db.sourceLicense.create({
-      data: {
-        sourceId: source.id,
-        licenseName: 'NHTSA Open Data / vPIC public API',
-        termsUrl: 'https://vpic.nhtsa.dot.gov/api/Home/Index/faq',
-        canStore: true,
-        canRedistribute: true,
-        canCommercialize: true,
-        retentionDays: null,
-        reviewedAt: new Date(),
-        notes: 'NHTSA vPIC FAQ: öffentliche Open-Data-API, keine Registrierung oder Lizenzanforderung. Stammdaten bleiben als NHTSA-Herkunft gekennzeichnet.'
-      }
-    });
-  }
-
-  return source;
 }
 
 async function fetchNhtsaFlatResult(vin: string): Promise<NhtsaFlatResult> {
@@ -138,42 +117,63 @@ async function fetchNhtsaFlatResult(vin: string): Promise<NhtsaFlatResult> {
   }
 }
 
-export async function decodeVinWithNhtsa(rawVin: string): Promise<{ mapped: NhtsaMappedSpecs; cached: boolean }> {
+export async function decodeVinWithNhtsa(rawVin: string): Promise<{ mapped: NhtsaMappedSpecs; cached: boolean; canStore: boolean }> {
   const vin = normalizeVin(rawVin);
   if (!isValidVin(vin)) throw new Error('INVALID_VIN');
 
-  const cached = await db.vinDecodeCache.findUnique({ where: { vin } });
-  if (cached && cached.expiresAt > new Date()) {
-    return { mapped: mapNhtsaResult(cached.payload as NhtsaFlatResult), cached: true };
+  const source = await ensureNhtsaSource();
+  if (!source.active) throw new Error('NHTSA_SOURCE_INACTIVE');
+  const storageLicense = findLicenseForAction(source.licenses, 'STORE');
+
+  if (storageLicense) {
+    const cached = await db.vinDecodeCache.findUnique({ where: { vin } });
+    if (cached && cached.expiresAt > new Date()) {
+      return { mapped: mapNhtsaResult(cached.payload as NhtsaFlatResult), cached: true, canStore: true };
+    }
   }
 
   const flat = await fetchNhtsaFlatResult(vin);
-  await db.vinDecodeCache.upsert({
-    where: { vin },
-    update: {
-      payload: flat as Prisma.InputJsonValue,
-      fetchedAt: new Date(),
-      expiresAt: new Date(Date.now() + NHTSA_CACHE_TTL_MS)
-    },
-    create: {
-      vin,
-      payload: flat as Prisma.InputJsonValue,
-      expiresAt: new Date(Date.now() + NHTSA_CACHE_TTL_MS)
-    }
-  });
 
-  return { mapped: mapNhtsaResult(flat), cached: false };
+  // Runtime code never creates or approves a SourceLicense. A cache write is only allowed
+  // after an explicit reviewed license already permits STORE for this source.
+  if (storageLicense) {
+    await db.vinDecodeCache.upsert({
+      where: { vin },
+      update: {
+        payload: flat as Prisma.InputJsonValue,
+        fetchedAt: new Date(),
+        expiresAt: new Date(Date.now() + NHTSA_CACHE_TTL_MS)
+      },
+      create: {
+        vin,
+        payload: flat as Prisma.InputJsonValue,
+        expiresAt: new Date(Date.now() + NHTSA_CACHE_TTL_MS)
+      }
+    });
+  }
+
+  return { mapped: mapNhtsaResult(flat), cached: false, canStore: Boolean(storageLicense) };
 }
 
-export async function hydrateVehicleFromNhtsa(rawVin: string) {
+export async function hydrateVehicleFromNhtsa(rawVin: string, origin: VehicleOrigin = 'PUBLIC_LOOKUP') {
   const vin = normalizeVin(rawVin);
   if (!isValidVin(vin)) throw new Error('INVALID_VIN');
 
-  const { mapped } = await decodeVinWithNhtsa(vin);
-  if (!hasDecodedValues(mapped)) return null;
+  // The VIN itself is the canonical identity and may be stored for a valid public lookup.
+  // @unique(vin) plus upsert guarantees one Vehicle row per VIN under concurrent requests.
+  const vehicle = await db.vehicle.upsert({
+    where: { vin },
+    update: {},
+    create: { vin, origin }
+  });
 
   const source = await ensureNhtsaSource();
-  const current = await db.vehicle.findUnique({ where: { vin } });
+  if (!source.active) return vehicle;
+  const storageLicense = findLicenseForAction(source.licenses, 'STORE');
+
+  const { mapped, canStore } = await decodeVinWithNhtsa(vin);
+  if (!canStore || !storageLicense || !hasDecodedValues(mapped)) return vehicle;
+
   const baseData = {
     make: mapped.make,
     model: mapped.model,
@@ -188,14 +188,12 @@ export async function hydrateVehicleFromNhtsa(rawVin: string) {
     vehicleType: mapped.vehicleType
   };
 
-  const vehicle = current
-    ? await db.vehicle.update({
-        where: { id: current.id },
-        data: Object.fromEntries(
-          Object.entries(baseData).filter(([key, value]) => value !== undefined && current[key as keyof typeof current] == null)
-        ) as Prisma.VehicleUpdateInput
-      })
-    : await db.vehicle.create({ data: { vin, ...baseData } });
+  const updatedVehicle = await db.vehicle.update({
+    where: { id: vehicle.id },
+    data: Object.fromEntries(
+      Object.entries(baseData).filter(([, value]) => value !== undefined)
+    ) as Prisma.VehicleUpdateInput
+  });
 
   const writes = Object.entries(mapped)
     .filter((entry): entry is [keyof NhtsaMappedSpecs, string | number] => entry[1] !== undefined)
@@ -220,5 +218,5 @@ export async function hydrateVehicleFromNhtsa(rawVin: string) {
     }));
 
   if (writes.length > 0) await db.$transaction(writes);
-  return vehicle;
+  return updatedVehicle;
 }
