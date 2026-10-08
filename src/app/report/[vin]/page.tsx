@@ -44,13 +44,13 @@ function formatSpec(value: unknown, suffix = '') {
   return `${String(value)}${suffix}`;
 }
 
-function providerIssueText(providerKey: string, errorCode: string | null) {
-  if (providerKey === DVSA_SOURCE_KEY) {
-    if (errorCode === 'CREDENTIALS_MISSING') return 'Die UK-MOT-Datenquelle ist technisch noch nicht konfiguriert. Fehlende MOT-Daten sind deshalb keine Aussage zur Fahrzeughistorie.';
-    if (errorCode?.startsWith('MOTH-RL') || errorCode === 'DVSA_LOCAL_RATE_LIMITED') return 'Die UK-MOT-Datenquelle ist momentan rate-limitiert. Die Abdeckung dieser Abfrage kann unvollständig sein.';
-    return 'Die UK-MOT-Datenquelle konnte bei dieser Abfrage nicht vollständig geprüft werden. Dies ist keine Aussage über vorhandene oder fehlende Fahrzeughistorie.';
-  }
-  return `Die Datenquelle ${providerKey} konnte bei dieser Abfrage nicht vollständig geprüft werden.`;
+function coverageText(state: string, reason: string | null) {
+  if (state === 'DATA') return 'Daten vorhanden';
+  if (state === 'NO_DATA') return 'Quelle wurde geprüft, lieferte für diese Abfrage aber keine Daten. Das ist keine Aussage über Unfallfreiheit.';
+  if (state === 'NOT_APPLICABLE') return `Für Markt/Abdeckung nicht anwendbar${reason ? ` (${reason})` : ''}.`;
+  if (state === 'NOT_CONFIGURED') return `Quelle ist für diese Nutzung noch nicht vollständig freigeschaltet${reason ? ` (${reason})` : ''}.`;
+  if (state === 'ERROR') return `Providerfehler bei dieser Abfrage${reason ? ` (${reason})` : ''}. Das Ergebnis darf nicht als NO_DATA behandelt werden.`;
+  return `Quelle wurde nicht live aufgerufen${reason ? ` (${reason})` : ''}.`;
 }
 
 export default async function ReportPage({ params }: { params: Promise<{ vin: string }> }) {
@@ -64,7 +64,7 @@ export default async function ReportPage({ params }: { params: Promise<{ vin: st
 
   const report = await getVehicleReport(vin, { hydrateNhtsa: true, hydrateDvsa: true });
   const vehicle = report.vehicle as Record<string, unknown>;
-  const provenance = (vehicle.provenance ?? {}) as Record<string, { source?: { name?: string } }>;
+  const provenance = (vehicle.provenance ?? {}) as Record<string, { source?: { name?: string }; conflict?: boolean; mappingVersion?: string | null }>;
   const specs: Array<[string, string, string]> = [
     ['make', 'Hersteller / Marke', ''], ['model', 'Modell', ''], ['modelYear', 'Modelljahr', ''],
     ['bodyClass', 'Karosserie / Fahrzeugtyp', ''], ['fuelType', 'Kraftstoff', ''],
@@ -88,10 +88,29 @@ export default async function ReportPage({ params }: { params: Promise<{ vin: st
       </section>
 
       <section className="noticeBox"><strong>Hinweis zur Datenlage</strong><p>{report.disclaimer}</p></section>
-      {report.providerIssues.length > 0 && (
+
+      <section className="resultCard">
+        <h2>Datenabdeckung dieser Abfrage</h2>
+        <p>Die Einträge beschreiben, was technisch geprüft wurde. Es wird keine Prozent-Coverage geschätzt.</p>
+        <div className="timeline">
+          {report.coverage.map((item) => (
+            <article key={item.providerKey}>
+              <strong>{item.providerName}</strong>
+              <span>{item.state} · {item.providerKey}</span>
+              <p>{coverageText(item.state, item.reason)}</p>
+              <small>Capabilities: {item.capabilities.join(', ')} · Mapping: {item.mappingVersion ?? 'nicht versioniert'}{item.market ? ` · Markt: ${item.market}` : ''}</small>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      {report.attributeConflicts.length > 0 && (
         <section className="noticeBox">
-          <strong>Abdeckung dieser Abfrage</strong>
-          {report.providerIssues.map((issue) => <p key={`${issue.providerKey}-${issue.errorCode}`}>{providerIssueText(issue.providerKey, issue.errorCode)}</p>)}
+          <strong>Widersprüchliche Quelldaten</strong>
+          <p>Mehrere freigegebene Quellen liefern unterschiedliche Werte. Schadendirekt behält alle Kandidaten und wählt für die Anzeige deterministisch; ein neuerer Wert gilt nicht automatisch als wahr.</p>
+          {report.attributeConflicts.map((conflict) => (
+            <p key={conflict.field}><strong>{conflict.field}:</strong> {conflict.candidates.map((candidate) => `${candidate.source.name} = ${candidate.value}`).join(' · ')}</p>
+          ))}
         </section>
       )}
 
@@ -103,7 +122,7 @@ export default async function ReportPage({ params }: { params: Promise<{ vin: st
               <div className="specItem" key={field}>
                 <span>{label}</span>
                 <strong>{formatSpec(vehicle[field], vehicle[field] == null ? '' : suffix)}</strong>
-                {provenance[field]?.source?.name && <small>Quelle: {provenance[field].source?.name}</small>}
+                {provenance[field]?.source?.name && <small>Quelle: {provenance[field].source?.name}{provenance[field].conflict ? ' · KONFLIKT' : ''}{provenance[field].mappingVersion ? ` · ${provenance[field].mappingVersion}` : ''}</small>}
               </div>
             ))}
           </div>
@@ -126,7 +145,7 @@ export default async function ReportPage({ params }: { params: Promise<{ vin: st
 
       <section className="resultCard">
         <h2>UK MOT-Prüfungshistorie</h2>
-        <p>DVSA-MOT-Daten sind technische Prüfungs- und Kilometerdaten für unterstützte Fahrzeuge aus Großbritannien/Nordirland. Sie sind keine Unfall- oder Versicherungshistorie.</p>
+        <p>DVSA-MOT-Daten sind technische Prüfungs- und Kilometerdaten für unterstützte Fahrzeuge aus Großbritannien. Sie sind keine Unfall- oder Versicherungshistorie.</p>
         {dvsaInspections.length === 0 ? <p>Keine veröffentlichbaren DVSA-MOT-Prüfungen vorhanden.</p> : (
           <div className="timeline">
             {dvsaInspections.map((event) => {
@@ -138,7 +157,7 @@ export default async function ReportPage({ params }: { params: Promise<{ vin: st
                   <span>{event.date ? new Date(event.date).toLocaleDateString('de-DE') : 'Datum unbekannt'}{details.expiryDate ? ` · gültig bis ${new Date(details.expiryDate).toLocaleDateString('de-DE')}` : ''}</span>
                   <p>{event.mileageKm != null ? `${event.mileageKm.toLocaleString('de-DE')} km normalisiert` : 'Kein sicher normalisierbarer Kilometerwert'}{details.odometer?.originalValue ? ` · Original: ${details.odometer.originalValue} ${details.odometer.originalUnit ?? ''}` : ''}</p>
                   {defects.length > 0 && <ul>{defects.map((defect, index) => <li key={`${event.id}-defect-${index}`}><strong>{defect.type ?? 'HINWEIS'}{defect.dangerous ? ' · GEFÄHRLICH' : ''}</strong>: {defect.text || 'Keine Beschreibung geliefert'}</li>)}</ul>}
-                  <small>MOT-Test: {details.motTestNumber ?? 'nicht geliefert'} · Quelle: {event.source.name} · Qualität: {event.quality}</small>
+                  <small>MOT-Test: {details.motTestNumber ?? 'nicht geliefert'} · Quelle: {event.source.name} · Qualität: {event.quality} · Mapping: {event.mappingVersion ?? '—'}</small>
                 </article>
               );
             })}
@@ -171,7 +190,7 @@ export default async function ReportPage({ params }: { params: Promise<{ vin: st
                 <strong>{event.title}</strong>
                 <span>{event.date ? new Date(event.date).toLocaleDateString('de-DE') : 'Datum unbekannt'} · {event.type}</span>
                 <p>{event.description ?? (event.mileageKm != null ? `${event.mileageKm.toLocaleString('de-DE')} km` : 'Keine Zusatzinformation')}</p>
-                <small>Quelle: {event.source.name} · Qualität: {event.quality}</small>
+                <small>Quelle: {event.source.name} · Qualität: {event.quality}{event.conflict ? ' · KONFLIKT' : ''} · Mapping: {event.mappingVersion ?? '—'}</small>
               </article>
             ))}
           </div>
