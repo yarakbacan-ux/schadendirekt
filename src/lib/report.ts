@@ -37,6 +37,7 @@ type ReportInput = {
     source: SourceInput;
   }>;
   attributes: Array<{
+    id: string;
     field: string;
     value: string;
     sourceField: string | null;
@@ -52,19 +53,43 @@ const SPEC_FIELDS = [
 ] as const;
 
 type SpecField = (typeof SPEC_FIELDS)[number];
+const NUMERIC_FIELDS = new Set<SpecField>(['modelYear', 'engineDisplacement', 'enginePowerKw']);
 
 function sourceAllowed(source: SourceInput, now: Date) {
   return Boolean(findLicenseForAction(source.licenses, 'COMMERCIALIZE', now));
 }
 
-function latestPublishableAttributes(input: ReportInput, now: Date) {
-  const result = new Map<string, ReportInput['attributes'][number]>();
+function compareAttributes(a: ReportInput['attributes'][number], b: ReportInput['attributes'][number]) {
+  const time = b.fetchedAt.getTime() - a.fetchedAt.getTime();
+  if (time !== 0) return time;
+  const source = a.source.key.localeCompare(b.source.key);
+  if (source !== 0) return source;
+  return a.id.localeCompare(b.id);
+}
+
+function selectedPublishableAttributes(input: ReportInput, now: Date) {
+  const grouped = new Map<string, ReportInput['attributes']>();
   for (const attribute of input.attributes) {
-    if (!sourceAllowed(attribute.source, now)) continue;
-    const current = result.get(attribute.field);
-    if (!current || attribute.fetchedAt > current.fetchedAt) result.set(attribute.field, attribute);
+    if (!sourceAllowed(attribute.source, now) || attribute.quality === 'REJECTED') continue;
+    const list = grouped.get(attribute.field) ?? [];
+    list.push(attribute);
+    grouped.set(attribute.field, list);
   }
-  return result;
+
+  const selected = new Map<string, ReportInput['attributes'][number]>();
+  for (const [field, candidates] of grouped) {
+    candidates.sort(compareAttributes);
+    if (candidates[0]) selected.set(field, candidates[0]);
+  }
+  return selected;
+}
+
+function reportAttributeValue(field: SpecField, value: string): string | number | null {
+  if (!NUMERIC_FIELDS.has(field)) return value;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  if (field === 'modelYear' && !Number.isInteger(parsed)) return null;
+  return parsed;
 }
 
 function eventDateSort(a: ReportInput['events'][number], b: ReportInput['events'][number]) {
@@ -74,7 +99,7 @@ function eventDateSort(a: ReportInput['events'][number], b: ReportInput['events'
 }
 
 export function serializeVehicleReport(input: ReportInput, now = new Date()) {
-  const attributes = latestPublishableAttributes(input, now);
+  const attributes = selectedPublishableAttributes(input, now);
   const timeline = input.events
     .filter((event) => sourceAllowed(event.source, now))
     .sort(eventDateSort)
@@ -91,22 +116,31 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
       source: { key: event.source.key, name: event.source.name }
     }));
 
-  const provenance: Record<string, { source: ReportSource; sourceField: string | null; quality: string; fetchedAt: string }> = {};
+  const provenance: Record<string, { source: ReportSource; sourceField: string | null; quality: string; fetchedAt: string; attributeId: string }> = {};
   const vehicle: Record<string, string | number | null | Record<string, unknown>> = { vin: input.vin };
 
   for (const field of SPEC_FIELDS) {
     const attribute = attributes.get(field);
-    const directValue = input[field];
-    if (!attribute || directValue == null) {
+    if (!attribute) {
       vehicle[field] = null;
       continue;
     }
-    vehicle[field] = directValue;
+
+    const selectedValue = reportAttributeValue(field, attribute.value);
+    if (selectedValue == null) {
+      vehicle[field] = null;
+      continue;
+    }
+
+    // The public value and its provenance are intentionally emitted from the exact same
+    // VehicleAttribute row. Canonical Vehicle.<field> is not used for publication.
+    vehicle[field] = selectedValue;
     provenance[field] = {
       source: { key: attribute.source.key, name: attribute.source.name },
       sourceField: attribute.sourceField,
       quality: attribute.quality,
-      fetchedAt: attribute.fetchedAt.toISOString()
+      fetchedAt: attribute.fetchedAt.toISOString(),
+      attributeId: attribute.id
     };
   }
   vehicle.provenance = provenance;
@@ -148,7 +182,7 @@ export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?:
 
   if (options.hydrateNhtsa !== false) {
     try {
-      await hydrateVehicleFromNhtsa(vin);
+      await hydrateVehicleFromNhtsa(vin, 'PUBLIC_LOOKUP');
     } catch (error) {
       console.warn('NHTSA hydration failed', { vin, error: error instanceof Error ? error.message : 'UNKNOWN' });
     }
