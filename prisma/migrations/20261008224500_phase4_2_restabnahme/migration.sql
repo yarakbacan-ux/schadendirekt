@@ -4,6 +4,9 @@ ALTER TABLE "ImportJob"
 CREATE INDEX IF NOT EXISTS "ImportJob_sourceId_checksum_mappingVersion_idx"
   ON "ImportJob"("sourceId", "checksum", "mappingVersion");
 
+ALTER TABLE "ProviderCoverage"
+  ADD COLUMN IF NOT EXISTS "allowUnknownMarket" BOOLEAN NOT NULL DEFAULT false;
+
 CREATE TABLE IF NOT EXISTS "SourceContract" (
   "id" TEXT NOT NULL,
   "sourceId" TEXT NOT NULL,
