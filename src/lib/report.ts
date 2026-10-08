@@ -1,7 +1,8 @@
 import { db } from '@/lib/db';
 import { findLicenseForAction, type LicenseLike } from '@/lib/license-policy';
 import { analyzeMileage } from '@/lib/mileage-analysis';
-import { hydrateVehicleFromNhtsa } from '@/lib/nhtsa';
+import { runVehicleProviders } from '@/lib/providers/orchestrator';
+import { NHTSA_SOURCE_KEY } from '@/lib/nhtsa';
 import { isValidVin, normalizeVin } from '@/lib/vin';
 import type { VehicleEventTypeName } from '@/lib/event-types';
 
@@ -132,8 +133,6 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
       continue;
     }
 
-    // The public value and its provenance are intentionally emitted from the exact same
-    // VehicleAttribute row. Canonical Vehicle.<field> is not used for publication.
     vehicle[field] = selectedValue;
     provenance[field] = {
       source: { key: attribute.source.key, name: attribute.source.name },
@@ -181,11 +180,11 @@ export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?:
   if (!isValidVin(vin)) throw new Error('INVALID_VIN');
 
   if (options.hydrateNhtsa !== false) {
-    try {
-      await hydrateVehicleFromNhtsa(vin, 'PUBLIC_LOOKUP');
-    } catch (error) {
-      console.warn('NHTSA hydration failed', { vin, error: error instanceof Error ? error.message : 'UNKNOWN' });
-    }
+    await runVehicleProviders(vin, {
+      origin: 'PUBLIC_LOOKUP',
+      providerKeys: [NHTSA_SOURCE_KEY],
+      capabilities: ['VIN_DECODE']
+    });
   }
 
   const vehicle = await db.vehicle.findUnique({
