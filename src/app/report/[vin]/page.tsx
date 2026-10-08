@@ -62,7 +62,7 @@ export default async function ReportPage({ params }: { params: Promise<{ vin: st
     );
   }
 
-  const report = await getVehicleReport(vin, { hydrateNhtsa: true, hydrateDvsa: true });
+  const report = await getVehicleReport(vin);
   const vehicle = report.vehicle as Record<string, unknown>;
   const provenance = (vehicle.provenance ?? {}) as Record<string, { source?: { name?: string }; conflict?: boolean; mappingVersion?: string | null }>;
   const specs: Array<[string, string, string]> = [
