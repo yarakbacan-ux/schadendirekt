@@ -25,6 +25,9 @@ enum DataQuality {
   UNVERIFIED
   PARTIAL
   VERIFIED
+  STALE
+  INCOMPLETE
+  CONFLICTING
   REJECTED
 }
 
@@ -51,6 +54,13 @@ enum ProviderRunStatus {
   SUCCESS
   FAILED
   SKIPPED
+}
+
+enum CoverageStatus {
+  LIVE
+  PARTIAL
+  PLANNED
+  UNAVAILABLE
 }
 
 model Vehicle {
@@ -93,6 +103,7 @@ model VehicleEvent {
   rawPayload          Json?
   rawPayloadExpiresAt DateTime?
   quality             DataQuality      @default(UNVERIFIED)
+  mappingVersion      String           @default("1")
   occurredAtText      String?
   importedAt          DateTime         @default(now())
   vehicle             Vehicle          @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
@@ -102,25 +113,28 @@ model VehicleEvent {
   @@index([vehicleId, eventDate])
   @@index([eventType])
   @@index([sourceId])
+  @@index([sourceId, mappingVersion])
   @@index([rawPayloadExpiresAt])
 }
 
 model VehicleAttribute {
-  id          String      @id @default(cuid())
-  vehicleId   String
-  sourceId    String
-  field       String
-  value       String      @db.Text
-  sourceField String?
-  rawValue    String?     @db.Text
-  quality     DataQuality @default(UNVERIFIED)
-  fetchedAt   DateTime    @default(now())
-  vehicle     Vehicle     @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
-  source      DataSource  @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+  id             String      @id @default(cuid())
+  vehicleId      String
+  sourceId       String
+  field          String
+  value          String      @db.Text
+  sourceField    String?
+  rawValue       String?     @db.Text
+  quality        DataQuality @default(UNVERIFIED)
+  mappingVersion String      @default("1")
+  fetchedAt      DateTime    @default(now())
+  vehicle        Vehicle     @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  source         DataSource  @relation(fields: [sourceId], references: [id], onDelete: Restrict)
 
   @@unique([vehicleId, sourceId, field])
   @@index([vehicleId, field])
   @@index([sourceId])
+  @@index([sourceId, mappingVersion])
 }
 
 model VinDecodeCache {
@@ -133,35 +147,82 @@ model VinDecodeCache {
 }
 
 model DataSource {
-  id                String             @id @default(cuid())
-  key               String             @unique
+  id                String                 @id @default(cuid())
+  key               String                 @unique
   name              String
   description       String?
-  active            Boolean            @default(true)
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
+  active            Boolean                @default(true)
+  authType          String?
+  refreshPolicy     String?
+  rateLimitPolicy   String?
+  mappingVersion    String                 @default("1")
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
   events            VehicleEvent[]
   vehicleAttributes VehicleAttribute[]
   importJobs        ImportJob[]
   licenses          SourceLicense[]
   providerRuns      ProviderRun[]
+  coverages         ProviderCoverage[]
+  mappings          SourceMappingVersion[]
+}
+
+model ProviderCoverage {
+  id                  String         @id @default(cuid())
+  sourceId            String
+  marketCode          String         @db.VarChar(16)
+  capabilities        String[]
+  status              CoverageStatus
+  earliestDate        DateTime?
+  latestDate          DateTime?
+  requiresCredentials Boolean        @default(false)
+  requiresContract    Boolean        @default(false)
+  requiresLicense     Boolean        @default(false)
+  freshnessHours      Int?
+  lastSuccessfulAt    DateTime?
+  qualityNote         String?
+  notes               String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+  source              DataSource     @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, marketCode])
+  @@index([marketCode, status])
+  @@index([sourceId, status])
+}
+
+model SourceMappingVersion {
+  id                String     @id @default(cuid())
+  sourceId          String
+  version           String
+  mapping           Json
+  effectiveFrom     DateTime   @default(now())
+  reprocessingNotes String?
+  createdAt         DateTime   @default(now())
+  source            DataSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, version])
+  @@index([sourceId, effectiveFrom])
 }
 
 model ProviderRun {
-  id         String            @id @default(cuid())
-  sourceId   String
-  vin        String?           @db.VarChar(17)
-  status     ProviderRunStatus
-  cached     Boolean           @default(false)
-  durationMs Int
-  errorCode  String?
-  startedAt  DateTime          @default(now())
-  finishedAt DateTime          @default(now())
-  source     DataSource        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  id               String            @id @default(cuid())
+  sourceId         String
+  vin              String?           @db.VarChar(17)
+  status           ProviderRunStatus
+  cached           Boolean           @default(false)
+  durationMs       Int
+  errorCode        String?
+  decisionReason   String?
+  mappingVersion   String?
+  startedAt        DateTime          @default(now())
+  finishedAt       DateTime          @default(now())
+  source           DataSource        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
   @@index([sourceId, finishedAt])
   @@index([status, finishedAt])
   @@index([vin])
+  @@index([sourceId, vin, finishedAt])
 }
 
 model ImportJob {
