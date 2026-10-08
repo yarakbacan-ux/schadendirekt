@@ -448,7 +448,7 @@ export async function runVehicleProviders(
         persisted = true;
       }
 
-      const runStatus = availability === 'DATA' ? 'SUCCESS' : 'NO_DATA';
+      const runStatus: 'SUCCESS' | 'NO_DATA' = availability === 'DATA' ? 'SUCCESS' : 'NO_DATA';
       const runScopes = eligibility.scopes.map((scope) => ({
         capability: scope.capability,
         status: scope.action === 'CALL' ? runStatus : capabilityStatus(scope),
