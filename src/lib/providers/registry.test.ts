@@ -4,10 +4,12 @@ import { mergeProviderResults } from '@/lib/providers/orchestrator';
 import type { ProviderOutcome } from '@/lib/providers/types';
 
 describe('provider registry', () => {
-  it('registers NHTSA and DVSA with distinct capabilities', () => {
+  it('registers NHTSA and DVSA with distinct capabilities and onboarding metadata', () => {
     expect(listProviders().map((provider) => provider.key)).toEqual(expect.arrayContaining(['nhtsa-vpic', 'dvsa-mot']));
     expect(getProvider('nhtsa-vpic')?.capabilities).toEqual(expect.arrayContaining(['VIN_DECODE', 'VEHICLE_SPECS']));
     expect(getProvider('dvsa-mot')?.capabilities).toEqual(expect.arrayContaining(['INSPECTION', 'ODOMETER', 'REGISTRATION']));
+    expect(getProvider('nhtsa-vpic')?.mappingVersion).toBeTruthy();
+    expect(getProvider('dvsa-mot')?.coverage[0]?.marketCode).toBe('GB');
     expect(getProvidersForCapability('VIN_DECODE').map((provider) => provider.key)).toContain('nhtsa-vpic');
     expect(getProvidersForCapability('INSPECTION').map((provider) => provider.key)).toContain('dvsa-mot');
     expect(getProvidersForCapability('DAMAGE').map((provider) => provider.key)).not.toContain('dvsa-mot');
@@ -19,16 +21,16 @@ describe('mergeProviderResults', () => {
     const at = new Date('2026-01-01T00:00:00Z');
     const outcomes: ProviderOutcome[] = [
       {
-        providerKey: 'z-provider', status: 'SUCCESS', cached: false, errorCode: null,
+        providerKey: 'z-provider', status: 'SUCCESS', decision: 'DATA', decisionReason: 'PROVIDER_RETURNED_DATA', mappingVersion: 'z-v1', cached: false, errorCode: null,
         attributes: [{ field: 'make', value: 'Z', sourceField: 'make', quality: 'VERIFIED', fetchedAt: at }],
         events: [{ externalId: '2', eventType: 'ODOMETER_READING', eventDate: new Date('2025-02-01'), mileageKm: 20, title: 'B', quality: 'VERIFIED' }]
       },
       {
-        providerKey: 'a-provider', status: 'SUCCESS', cached: false, errorCode: null,
+        providerKey: 'a-provider', status: 'SUCCESS', decision: 'DATA', decisionReason: 'PROVIDER_RETURNED_DATA', mappingVersion: 'a-v1', cached: false, errorCode: null,
         attributes: [{ field: 'make', value: 'A', sourceField: 'make', quality: 'VERIFIED', fetchedAt: at }],
         events: [{ externalId: '1', eventType: 'ODOMETER_READING', eventDate: new Date('2025-01-01'), mileageKm: 10, title: 'A', quality: 'VERIFIED' }]
       },
-      { providerKey: 'failed', status: 'FAILED', cached: false, errorCode: 'DOWN', attributes: [], events: [] }
+      { providerKey: 'failed', status: 'FAILED', decision: 'ERROR', decisionReason: 'PROVIDER_ERROR', mappingVersion: 'f-v1', cached: false, errorCode: 'DOWN', attributes: [], events: [] }
     ];
 
     const merged = mergeProviderResults(outcomes);
