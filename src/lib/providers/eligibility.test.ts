@@ -53,7 +53,6 @@ describe('provider eligibility', () => {
       key: 'contract-test',
       coverage: [{ market: 'DE', capabilities: ['ODOMETER'], status: 'LIVE', requirements: ['LICENSE', 'CONTRACT'] }]
     };
-
     expect(evaluateProviderEligibility({ ...base, provider: contractProvider, hasRequiredContract: false, hasRequiredLicense: true }))
       .toMatchObject({ action: 'SKIP', reason: 'CONTRACT_REQUIRED' });
     expect(evaluateProviderEligibility({ ...base, provider: contractProvider, hasRequiredContract: true, hasRequiredLicense: false }))
@@ -65,13 +64,39 @@ describe('provider eligibility', () => {
   it('uses operational coverage freshness before provider defaults', () => {
     const operationalProvider: VehicleDataProvider = {
       ...provider,
-      coverage: [{
-        market: 'DE', capabilities: ['ODOMETER'], status: 'LIVE', requirements: ['LICENSE'], freshnessSeconds: 60
-      }]
+      coverage: [{ market: 'DE', capabilities: ['ODOMETER'], status: 'LIVE', requirements: ['LICENSE'], freshnessSeconds: 60 }]
     };
     expect(evaluateProviderEligibility({ ...base, provider: operationalProvider, lastSuccessfulAt: new Date('2026-10-08T11:58:30Z') }))
       .toMatchObject({ action: 'CALL' });
     expect(evaluateProviderEligibility({ ...base, provider: operationalProvider, lastSuccessfulAt: new Date('2026-10-08T11:59:30Z') }))
       .toMatchObject({ action: 'SKIP', reason: 'FRESH_DATA' });
+  });
+
+  it('evaluates status, requirements and freshness independently per capability', () => {
+    const multi: VehicleDataProvider = {
+      ...provider,
+      key: 'multi-cap',
+      capabilities: ['VEHICLE_SPECS', 'ODOMETER', 'DAMAGE'],
+      coverage: [
+        { market: 'DE', capabilities: ['VEHICLE_SPECS'], status: 'LIVE', requirements: ['LICENSE'], freshnessSeconds: 3600 },
+        { market: 'DE', capabilities: ['ODOMETER'], status: 'LIVE', requirements: ['CONTRACT'], freshnessSeconds: 0 },
+        { market: 'DE', capabilities: ['DAMAGE'], status: 'UNAVAILABLE' }
+      ]
+    };
+    const decision = evaluateProviderEligibility({
+      ...base,
+      provider: multi,
+      requestedCapabilities: ['VEHICLE_SPECS', 'ODOMETER', 'DAMAGE'],
+      hasRequiredLicenseByCapability: { VEHICLE_SPECS: true, ODOMETER: true, DAMAGE: true },
+      hasRequiredContractByCapability: { VEHICLE_SPECS: true, ODOMETER: true, DAMAGE: true },
+      lastSuccessfulAtByCapability: { VEHICLE_SPECS: new Date('2026-10-08T11:30:00Z'), ODOMETER: null, DAMAGE: null }
+    });
+    expect(decision.action).toBe('CALL');
+    expect(decision.eligibleCapabilities).toEqual(['ODOMETER']);
+    expect(decision.scopes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ capability: 'VEHICLE_SPECS', action: 'SKIP', reason: 'FRESH_DATA' }),
+      expect.objectContaining({ capability: 'ODOMETER', action: 'CALL', reason: 'ELIGIBLE' }),
+      expect.objectContaining({ capability: 'DAMAGE', action: 'NOT_APPLICABLE', reason: 'COVERAGE_UNAVAILABLE' })
+    ]));
   });
 });
