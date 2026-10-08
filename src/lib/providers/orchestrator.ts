@@ -134,6 +134,7 @@ export async function runVehicleProviders(
     origin?: VehicleOrigin;
     providerKeys?: readonly string[];
     capabilities?: readonly ProviderCapability[];
+    providers?: readonly VehicleDataProvider[];
   } = {}
 ): Promise<ProviderOutcome[]> {
   const vin = normalizeVin(rawVin);
@@ -145,7 +146,9 @@ export async function runVehicleProviders(
     create: { vin, origin: options.origin ?? 'PUBLIC_LOOKUP' }
   });
 
-  const providers = selectProviders({ providerKeys: options.providerKeys, capabilities: options.capabilities });
+  const providers = options.providers
+    ? [...options.providers]
+    : selectProviders({ providerKeys: options.providerKeys, capabilities: options.capabilities });
   const outcomes: ProviderOutcome[] = [];
 
   for (const provider of providers) {
