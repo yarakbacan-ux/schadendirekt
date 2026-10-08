@@ -21,9 +21,9 @@ describe('DVSA API error semantics', () => {
   });
 
   it.each([
-    [401, 'MOTH-UA-01'],
+    [401, 'MOTH-UD-01'],
     [403, 'MOTH-FB-01']
-  ])('does not convert HTTP %s into no-data', async (status, code) => {
+  ])('does not convert HTTP 5s into no-data', async (status, code) => {
     configure();
     const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ errorCode: code }), { status }));
     const client = createDvsaClient({ fetchImpl, tokenProvider: async () => 'token', retries: 0 });
@@ -32,7 +32,9 @@ describe('DVSA API error semantics', () => {
 
   it('retries 429 with backoff and keeps it an explicit error when exhausted', async () => {
     configure();
-    const fetchImpl = vi.fn().mockResolvedValue(new Response(JSON.stringify({ errorCode: 'MOTH-RL-02' }), { status: 429 }));
+    const fetchImpl = vi.fn().mockImplementation(async () =>
+      new Response(JSON.stringify({ errorCode: 'MOTH-RL-02' }), { status: 429 })
+    );
     const sleep = vi.fn().mockResolvedValue(undefined);
     const client = createDvsaClient({ fetchImpl, tokenProvider: async () => 'token', sleep, retries: 1 });
     try {
