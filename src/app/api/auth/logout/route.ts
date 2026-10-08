@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
-import { CSRF_COOKIE, SESSION_COOKIE, destroySession } from '@/lib/auth';
+import { CSRF_COOKIE, SESSION_COOKIE, destroySession, requireRequestRole, verifyCsrf } from '@/lib/auth';
 
 export async function POST(request: Request) {
-  const origin = request.headers.get('origin');
-  if (!origin || origin !== new URL(request.url).origin) {
-    return NextResponse.json({ error: 'ORIGIN_REJECTED' }, { status: 403 });
+  const session = await requireRequestRole(request, ['ADMIN', 'ANALYST', 'VIEWER']);
+  if (!session) return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
+  if (!verifyCsrf(request, session.csrfTokenHash)) {
+    return NextResponse.json({ error: 'CSRF_REJECTED' }, { status: 403 });
   }
 
   await destroySession(request.headers.get('cookie'));
