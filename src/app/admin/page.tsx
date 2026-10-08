@@ -6,6 +6,7 @@ import { db } from '@/lib/db';
 import { getSession, roleAllowed } from '@/lib/auth';
 import { analyzeMileage } from '@/lib/mileage-analysis';
 import { VEHICLE_EVENT_TYPES } from '@/lib/event-types';
+import { listProviders } from '@/lib/providers/registry';
 
 export const dynamic = 'force-dynamic';
 
@@ -37,7 +38,13 @@ export default async function AdminPage({
   const [vehicleCount, eventCount, sources, imports, events, vehicles] = await Promise.all([
     db.vehicle.count(),
     db.vehicleEvent.count(),
-    db.dataSource.findMany({ include: { licenses: true }, orderBy: { name: 'asc' } }),
+    db.dataSource.findMany({
+      include: {
+        licenses: true,
+        providerRuns: { orderBy: { finishedAt: 'desc' }, take: 1 }
+      },
+      orderBy: { name: 'asc' }
+    }),
     db.importJob.findMany({ orderBy: { createdAt: 'desc' }, take: 10, include: { source: true } }),
     db.vehicleEvent.findMany({
       where: eventWhere,
@@ -60,19 +67,21 @@ export default async function AdminPage({
     vehicle,
     mileage: analyzeMileage(vehicle.events)
   }));
+  const registeredProviders = listProviders();
+  const providerByKey = new Map(registeredProviders.map((provider) => [provider.key, provider]));
 
   return (
     <main className="shell adminShell">
       <section className="hero">
         <span className="eyebrow">ADMIN · ROLE: {session.user.role}</span>
         <h1>Fahrzeuge, Quellen und Datenqualität</h1>
-        <p>Kontrollzentrum für Stammdaten, Ereignisse, Importe, Lizenzstatus und Kilometerwarnungen.</p>
+        <p>Kontrollzentrum für Stammdaten, Ereignisse, Importe, Providerstatus, Lizenzstatus und Kilometerwarnungen.</p>
       </section>
 
       <section className="adminStats">
         <div><strong>{vehicleCount}</strong><span>Fahrzeuge</span></div>
         <div><strong>{eventCount}</strong><span>Ereignisse</span></div>
-        <div><strong>{sources.length}</strong><span>Datenquellen</span></div>
+        <div><strong>{registeredProviders.length}</strong><span>Provider</span></div>
         <div><strong>{imports.filter((job) => job.status === 'FAILED' || job.status === 'PARTIAL').length}</strong><span>Importe mit Hinweis</span></div>
       </section>
 
@@ -94,6 +103,29 @@ export default async function AdminPage({
           </select>
           <button>Filtern</button>
         </form>
+      </section>
+
+      <section className="resultCard">
+        <h2>Provider & Health</h2>
+        <div className="timeline">
+          {registeredProviders.map((provider) => {
+            const source = sources.find((item) => item.key === provider.key);
+            const lastRun = source?.providerRuns[0];
+            const storeAllowed = source?.licenses.some((license) => license.canStore) ?? false;
+            const commercialAllowed = source?.licenses.some((license) => license.canRedistribute && license.canCommercialize) ?? false;
+            return (
+              <article key={provider.key}>
+                <strong>{provider.name}</strong>
+                <span>{provider.key} · {source?.active === false ? 'INAKTIV' : 'REGISTRIERT'}</span>
+                <p>Capabilities: {provider.capabilities.join(', ')}</p>
+                <p>Lizenz: Store {storeAllowed ? '✓' : '✗'} · Commercial {commercialAllowed ? '✓' : '✗'}</p>
+                <p>{lastRun
+                  ? `Letzter Lauf: ${lastRun.status} · ${lastRun.cached ? 'Cache' : 'Live'} · ${lastRun.durationMs} ms · ${lastRun.finishedAt.toLocaleString('de-DE')}${lastRun.errorCode ? ` · ${lastRun.errorCode}` : ''}`
+                  : 'Noch kein Provider-Lauf protokolliert.'}</p>
+              </article>
+            );
+          })}
+        </div>
       </section>
 
       <section className="resultCard">
@@ -141,12 +173,15 @@ export default async function AdminPage({
         </article>
         <article className="resultCard reportPanel">
           <h2>Datenquellen & Lizenzstatus</h2>
-          <div className="timeline">{sources.map((source) => (
-            <article key={source.id}>
-              <strong>{source.name}</strong><span>{source.key} · {source.active ? 'AKTIV' : 'INAKTIV'}</span>
-              <p>{source.licenses.length === 0 ? 'Keine Lizenz dokumentiert.' : source.licenses.map((license) => `${license.licenseName}: Store ${license.canStore ? '✓' : '✗'}, Redistribute ${license.canRedistribute ? '✓' : '✗'}, Commercial ${license.canCommercialize ? '✓' : '✗'}`).join(' · ')}</p>
-            </article>
-          ))}</div>
+          <div className="timeline">{sources.map((source) => {
+            const provider = providerByKey.get(source.key);
+            return (
+              <article key={source.id}>
+                <strong>{source.name}</strong><span>{source.key} · {source.active ? 'AKTIV' : 'INAKTIV'}{provider ? ' · PROVIDER' : ''}</span>
+                <p>{source.licenses.length === 0 ? 'Keine Lizenz dokumentiert.' : source.licenses.map((license) => `${license.licenseName}: Store ${license.canStore ? '✓' : '✗'}, Redistribute ${license.canRedistribute ? '✓' : '✗'}, Commercial ${license.canCommercialize ? '✓' : '✗'}`).join(' · ')}</p>
+              </article>
+            );
+          })}</div>
         </article>
       </section>
     </main>
