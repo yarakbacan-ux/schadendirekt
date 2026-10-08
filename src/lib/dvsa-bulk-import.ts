@@ -323,7 +323,6 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
   let rowsRead = 0;
   let rowsValidated = 0;
   let rowsWritten = 0;
-  let failedBatchRows = 0;
   const errors: DvsaImportError[] = [];
   const batch: DvsaBulkRecord[] = [];
 
@@ -337,7 +336,6 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
         await applyRecord(record, job.sourceId, license, job.mappingVersion, job.createdAt);
         rowsWritten += 1;
       } catch (error) {
-        failedBatchRows += 1;
         errors.push({
           index: record.lineNumber,
           message: error instanceof Error ? error.message : 'DVSA_RECORD_FAILED',
@@ -356,8 +354,7 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
     }
     await flush();
 
-    const validationFailures = Math.max(0, rowsRead - rowsValidated);
-    const rowsFailed = validationFailures + failedBatchRows;
+    const rowsFailed = Math.max(0, rowsRead - rowsWritten);
     const status = rowsFailed === 0 ? 'COMPLETED' : rowsWritten === 0 ? 'FAILED' : 'PARTIAL';
     return db.importJob.update({
       where: { id: job.id },
