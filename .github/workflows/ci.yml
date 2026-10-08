@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -22,14 +25,24 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install dependencies and generate lockfile
-        run: npm install
+      - name: Regenerate complete npm lockfile
+        run: npm install --package-lock-only
 
-      - name: Upload generated lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-lock
-          path: package-lock.json
+      - name: Commit generated lockfile
+        if: github.event_name == 'push'
+        run: |
+          if git diff --quiet -- package-lock.json; then
+            echo "package-lock.json already up to date"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add package-lock.json
+            git commit -m "ci: generate complete npm lockfile"
+            git push
+          fi
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Generate Prisma client
         run: npm run db:generate
