@@ -1,14 +1,15 @@
 import { createHash } from 'node:crypto';
+import { Readable, type Readable as NodeReadable } from 'node:stream';
 import { Prisma } from '@prisma/client';
 import { db } from '@/lib/db';
-import { parseCsv } from '@/lib/csv';
 import { recomputeVehicleEventConflicts } from '@/lib/event-conflicts';
 import { eventFingerprint } from '@/lib/fingerprint';
 import { findLicenseForAction, retentionExpiry } from '@/lib/license-policy';
 import { validateImportRecord, type ImportRecord } from '@/lib/import-validation';
 import { normalizeEventType } from '@/lib/event-types';
-import { getImportStorage } from '@/lib/import-storage';
+import { getImportStorage, type ImportByteStream } from '@/lib/import-storage';
 import { calculateImportAccounting } from '@/lib/import-accounting';
+import { streamImportRecords } from '@/lib/import-stream';
 
 export type ImportFormat = 'JSON' | 'CSV';
 export const GENERIC_IMPORT_MAPPING_VERSION = 'generic-import-v1';
@@ -27,23 +28,82 @@ export function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-function parsePayload(raw: string, format: ImportFormat): unknown[] {
-  if (format === 'CSV') return parseCsv(raw);
-  const parsed = JSON.parse(raw);
-  const records = Array.isArray(parsed) ? parsed : parsed.records;
-  if (!Array.isArray(records)) throw new Error('INVALID_IMPORT_PAYLOAD');
-  return records;
-}
-
 function normalizedMappingVersion(value: string | undefined): string {
   const version = value?.trim() || GENERIC_IMPORT_MAPPING_VERSION;
   if (!/^[a-zA-Z0-9._:-]{1,100}$/.test(version)) throw new Error('INVALID_MAPPING_VERSION');
   return version;
 }
 
-export function importObjectKey(sourceKey: string, jobId: string, checksum: string, format: ImportFormat): string {
+export function importObjectKey(sourceKey: string, jobId: string, format: ImportFormat): string {
   const safeSource = sourceKey.replace(/[^a-zA-Z0-9._-]/g, '_');
-  return `${safeSource}/${jobId}-${checksum}.${format.toLowerCase()}`;
+  return `${safeSource}/${jobId}.${format.toLowerCase()}`;
+}
+
+async function importSourceForStorage(sourceKey: string) {
+  const source = await db.dataSource.findUnique({ where: { key: sourceKey }, include: { licenses: true } });
+  if (!source || !source.active) throw new Error('SOURCE_NOT_FOUND_OR_INACTIVE');
+  const license = findLicenseForAction(source.licenses, 'STORE');
+  if (!license) throw new Error('SOURCE_STORAGE_NOT_LICENSED');
+  if (license.retentionDays === 0) throw new Error('SOURCE_RETENTION_TOO_SHORT_FOR_ASYNC_IMPORT');
+  return { source, license };
+}
+
+export async function queueImportStream(
+  sourceKey: string,
+  stream: ImportByteStream,
+  format: ImportFormat,
+  fileName?: string,
+  mappingVersion?: string,
+  expectedChecksum?: string
+) {
+  const version = normalizedMappingVersion(mappingVersion);
+  const { source, license } = await importSourceForStorage(sourceKey);
+  const expiresAt = retentionExpiry(license);
+  const job = await db.importJob.create({
+    data: { sourceId: source.id, status: 'PENDING', format, checksum: null, fileName, mappingVersion: version }
+  });
+
+  const storage = getImportStorage();
+  const key = importObjectKey(source.key, job.id, format);
+  try {
+    const stored = await storage.putStream(key, stream);
+    if (expectedChecksum && expectedChecksum !== stored.checksum) throw new Error('CHECKSUM_MISMATCH');
+
+    const duplicate = await db.importJob.findFirst({
+      where: {
+        id: { not: job.id },
+        sourceId: source.id,
+        checksum: stored.checksum,
+        mappingVersion: version,
+        status: { in: ['PENDING', 'RUNNING', 'PARTIAL', 'COMPLETED'] }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+    if (duplicate) {
+      await storage.delete(stored.key).catch(() => undefined);
+      await db.importJob.delete({ where: { id: job.id } });
+      return duplicate;
+    }
+
+    await db.$transaction([
+      db.importJob.update({ where: { id: job.id }, data: { checksum: stored.checksum } }),
+      db.importObject.create({
+        data: {
+          importJobId: job.id,
+          provider: stored.provider,
+          storageKey: stored.key,
+          sizeBytes: stored.sizeBytes,
+          checksum: stored.checksum,
+          expiresAt
+        }
+      })
+    ]);
+    return db.importJob.findUniqueOrThrow({ where: { id: job.id } });
+  } catch (error) {
+    await storage.delete(key).catch(() => undefined);
+    await db.importJob.delete({ where: { id: job.id } }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function queueImport(
@@ -54,53 +114,7 @@ export async function queueImport(
   fileName?: string,
   mappingVersion?: string
 ) {
-  const version = normalizedMappingVersion(mappingVersion);
-  const source = await db.dataSource.findUnique({
-    where: { key: sourceKey },
-    include: { licenses: true }
-  });
-  if (!source || !source.active) throw new Error('SOURCE_NOT_FOUND_OR_INACTIVE');
-
-  const license = findLicenseForAction(source.licenses, 'STORE');
-  if (!license) throw new Error('SOURCE_STORAGE_NOT_LICENSED');
-  if (license.retentionDays === 0) throw new Error('SOURCE_RETENTION_TOO_SHORT_FOR_ASYNC_IMPORT');
-
-  const duplicate = await db.importJob.findFirst({
-    where: {
-      sourceId: source.id,
-      checksum,
-      mappingVersion: version,
-      status: { in: ['PENDING', 'RUNNING', 'PARTIAL', 'COMPLETED'] }
-    },
-    orderBy: { createdAt: 'desc' }
-  });
-  if (duplicate) return duplicate;
-
-  const expiresAt = retentionExpiry(license);
-  const job = await db.importJob.create({
-    data: { sourceId: source.id, status: 'PENDING', format, checksum, fileName, mappingVersion: version }
-  });
-
-  const storage = getImportStorage();
-  const key = importObjectKey(source.key, job.id, checksum, format);
-  try {
-    const stored = await storage.put(key, raw);
-    await db.importObject.create({
-      data: {
-        importJobId: job.id,
-        provider: stored.provider,
-        storageKey: stored.key,
-        sizeBytes: stored.sizeBytes,
-        checksum,
-        expiresAt
-      }
-    });
-    return job;
-  } catch (error) {
-    await storage.delete(key).catch(() => undefined);
-    await db.importJob.delete({ where: { id: job.id } }).catch(() => undefined);
-    throw error;
-  }
+  return queueImportStream(sourceKey, Readable.from([raw]), format, fileName, mappingVersion, checksum);
 }
 
 async function processRecordBatch(
@@ -161,16 +175,16 @@ async function processRecordBatch(
   return records.length;
 }
 
-async function loadJobPayload(job: {
+async function openJobPayload(job: {
   object: { provider: string; storageKey: string } | null;
   payload: { content: string } | null;
-}): Promise<string> {
+}): Promise<NodeReadable> {
   if (job.object) {
     const storage = getImportStorage();
     if (job.object.provider !== storage.provider) throw new Error('IMPORT_STORAGE_PROVIDER_UNAVAILABLE');
-    return storage.readText(job.object.storageKey);
+    return storage.openReadStream(job.object.storageKey);
   }
-  if (job.payload) return job.payload.content;
+  if (job.payload) return Readable.from([job.payload.content]);
   throw new Error('IMPORT_JOB_OR_PAYLOAD_NOT_FOUND');
 }
 
@@ -183,10 +197,7 @@ async function disposeJobPayload(job: {
     const storage = getImportStorage();
     if (job.object.provider === storage.provider) {
       await storage.delete(job.object.storageKey).catch(() => undefined);
-      await db.importObject.updateMany({
-        where: { importJobId: job.id, deletedAt: null },
-        data: { deletedAt: new Date() }
-      });
+      await db.importObject.updateMany({ where: { importJobId: job.id, deletedAt: null }, data: { deletedAt: new Date() } });
     }
   }
   if (job.payload) await db.importPayload.deleteMany({ where: { importJobId: job.id } });
@@ -194,19 +205,16 @@ async function disposeJobPayload(job: {
 
 export async function claimPendingImportJobs(limit = 1): Promise<ClaimedJob[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('INVALID_CLAIM_LIMIT');
-
   return db.$queryRaw<ClaimedJob[]>(Prisma.sql`
     WITH candidates AS (
-      SELECT "id"
-      FROM "ImportJob"
+      SELECT "id" FROM "ImportJob"
       WHERE "status" = 'PENDING'::"ImportStatus"
       ORDER BY "createdAt" ASC
       FOR UPDATE SKIP LOCKED
       LIMIT ${limit}
     )
     UPDATE "ImportJob" AS job
-    SET "status" = 'RUNNING'::"ImportStatus",
-        "startedAt" = COALESCE(job."startedAt", NOW())
+    SET "status" = 'RUNNING'::"ImportStatus", "startedAt" = COALESCE(job."startedAt", NOW())
     FROM candidates
     WHERE job."id" = candidates."id"
     RETURNING job."id"
@@ -214,6 +222,7 @@ export async function claimPendingImportJobs(limit = 1): Promise<ClaimedJob[]> {
 }
 
 export async function processImportJob(jobId: string, batchSize = 250) {
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 10_000) throw new Error('INVALID_BATCH_SIZE');
   const job = await db.importJob.findUnique({
     where: { id: jobId },
     include: { payload: true, object: true, source: { include: { licenses: true } } }
@@ -232,46 +241,44 @@ export async function processImportJob(jobId: string, batchSize = 250) {
   }
 
   try {
-    const raw = await loadJobPayload(job);
-    const inputs = parsePayload(raw, job.format as ImportFormat);
-    const valid: ImportRecord[] = [];
+    const stream = await openJobPayload(job);
     const errors: ErrorEntry[] = [];
-
-    inputs.forEach((input, index) => {
-      try {
-        valid.push(validateImportRecord(input));
-      } catch (error) {
-        errors.push({ index, message: error instanceof Error ? error.message : 'VALIDATION_FAILED', rows: 1 });
-      }
-    });
-
+    const batch: ImportRecord[] = [];
+    let rowsRead = 0;
+    let rowsValidated = 0;
     let written = 0;
     let failedBatchRows = 0;
     const rawExpiresAt = retentionExpiry(license, job.createdAt);
-    for (const batch of chunkArray(valid, batchSize)) {
-      try {
-        written += await processRecordBatch(job.source.key, job.sourceId, batch, rawExpiresAt, job.mappingVersion);
-      } catch (error) {
-        failedBatchRows += batch.length;
-        errors.push({ index: -1, message: error instanceof Error ? error.message : 'BATCH_FAILED', rows: batch.length });
-      }
-    }
 
-    const accounting = calculateImportAccounting({
-      rowsRead: inputs.length,
-      rowsValidated: valid.length,
-      rowsWritten: written,
-      failedBatchRows
-    });
+    const flush = async () => {
+      if (batch.length === 0) return;
+      const current = batch.splice(0, batch.length);
+      try {
+        written += await processRecordBatch(job.source.key, job.sourceId, current, rawExpiresAt, job.mappingVersion);
+      } catch (error) {
+        failedBatchRows += current.length;
+        errors.push({ index: -1, message: error instanceof Error ? error.message : 'BATCH_FAILED', rows: current.length });
+      }
+    };
+
+    for await (const input of streamImportRecords(stream, job.format as ImportFormat)) {
+      const index = rowsRead;
+      rowsRead += 1;
+      try {
+        batch.push(validateImportRecord(input));
+        rowsValidated += 1;
+      } catch (error) {
+        errors.push({ index, message: error instanceof Error ? error.message : 'VALIDATION_FAILED', rows: 1 });
+      }
+      if (batch.length >= batchSize) await flush();
+    }
+    await flush();
+
+    const accounting = calculateImportAccounting({ rowsRead, rowsValidated, rowsWritten: written, failedBatchRows });
     const status = accounting.rowsFailed === 0 ? 'COMPLETED' : accounting.rowsWritten === 0 ? 'FAILED' : 'PARTIAL';
     const result = await db.importJob.update({
       where: { id: job.id },
-      data: {
-        status,
-        ...accounting,
-        errorLog: errors,
-        finishedAt: new Date()
-      }
+      data: { status, ...accounting, errorLog: errors, finishedAt: new Date() }
     });
     await disposeJobPayload(job);
     return result;
@@ -299,13 +306,8 @@ export async function processPendingImportJobs(limit = 1, batchSize = 250) {
 }
 
 export async function cleanupExpiredRawData(now = new Date()) {
-  await db.vehicleEvent.updateMany({
-    where: { rawPayloadExpiresAt: { lte: now } },
-    data: { rawPayload: Prisma.DbNull, rawPayloadExpiresAt: null }
-  });
-
+  await db.vehicleEvent.updateMany({ where: { rawPayloadExpiresAt: { lte: now } }, data: { rawPayload: Prisma.DbNull, rawPayloadExpiresAt: null } });
   await db.importPayload.deleteMany({ where: { expiresAt: { lte: now } } });
-
   const expiredObjects = await db.importObject.findMany({
     where: { expiresAt: { lte: now }, deletedAt: null },
     select: { id: true, provider: true, storageKey: true }

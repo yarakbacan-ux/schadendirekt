@@ -6,13 +6,12 @@ import { analyzeAttributeConflict } from '@/lib/providers/conflicts';
 import { runVehicleProviders } from '@/lib/providers/orchestrator';
 import { buildReportCoverage } from '@/lib/report-coverage';
 import { selectProviders } from '@/lib/providers/registry';
-import type { ProviderOutcome, VehicleDataProvider } from '@/lib/providers/types';
+import type { ProviderCapability, ProviderOutcome, VehicleDataProvider } from '@/lib/providers/types';
 import { isValidVin, normalizeVin } from '@/lib/vin';
 import type { VehicleEventTypeName } from '@/lib/event-types';
 
 export type ReportSource = { key: string; name: string };
-
-type SourceInput = ReportSource & { licenses: LicenseLike[] };
+type SourceInput = ReportSource & { licenses: LicenseLike[]; preauthorizedCommercialUse?: boolean };
 
 type ReportInput = {
   vin: string;
@@ -61,31 +60,49 @@ export type VehicleReportOptions = {
   hydrateProviders?: boolean;
   providerKeys?: readonly string[];
   excludeProviderKeys?: readonly string[];
-  /**
-   * A trusted caller may supply a known market. If omitted, report hydration only
-   * uses a market that is backed by a stored, non-conflicting provenance record.
-   * Passing null explicitly means unknown and never falls back to an unproven
-   * canonical market value.
-   */
+  /** Backwards-compatible explicit trusted market supplied by a server-side caller. */
   market?: string | null;
+  /** Preferred explicit market hint. It is only used when trusted=true. */
+  marketHint?: { market: string; trusted: boolean; provenance: string } | null;
 };
 
 const SPEC_FIELDS = [
   'make', 'model', 'modelYear', 'bodyClass', 'fuelType', 'engineDisplacement',
   'enginePowerKw', 'transmission', 'manufacturer', 'plantCountry', 'vehicleType', 'market'
 ] as const;
-
 type SpecField = (typeof SPEC_FIELDS)[number];
 const NUMERIC_FIELDS = new Set<SpecField>(['modelYear', 'engineDisplacement', 'enginePowerKw']);
 
-function sourceAllowed(source: SourceInput, now: Date) {
-  return Boolean(findLicenseForAction(source.licenses, 'COMMERCIALIZE', now));
+function normalizeMarket(value: string | null | undefined): string | null {
+  const market = value?.trim().toUpperCase() ?? '';
+  return /^[A-Z]{2}$/.test(market) ? market : null;
+}
+
+function eventCapability(eventType: string): ProviderCapability | null {
+  if (eventType === 'ODOMETER_READING') return 'ODOMETER';
+  if (eventType === 'DAMAGE_RECORD') return 'DAMAGE';
+  if (eventType === 'INSPECTION') return 'INSPECTION';
+  if (eventType === 'REGISTRATION' || eventType === 'IMPORT_EXPORT') return 'REGISTRATION';
+  if (eventType === 'RECALL') return 'RECALLS';
+  return null;
+}
+
+function sourceAllowed(source: SourceInput, now: Date, capability: ProviderCapability | null, market: string | null) {
+  if (source.preauthorizedCommercialUse) return true;
+  if (capability && findLicenseForAction(source.licenses, 'COMMERCIALIZE', now, { market, capability })) return true;
+  if (!capability && findLicenseForAction(source.licenses, 'COMMERCIALIZE', now, { market })) return true;
+  return false;
+}
+
+function attributeCapability(field: string): ProviderCapability {
+  return field === 'market' ? 'REGISTRATION' : 'VEHICLE_SPECS';
 }
 
 function selectedPublishableAttributes(input: ReportInput, now: Date) {
   const grouped = new Map<string, ReportInput['attributes']>();
   for (const attribute of input.attributes) {
-    if (!sourceAllowed(attribute.source, now) || attribute.quality === 'REJECTED') continue;
+    const policyMarket = attribute.field === 'market' ? normalizeMarket(attribute.value) : normalizeMarket(input.market);
+    if (!sourceAllowed(attribute.source, now, attributeCapability(attribute.field), policyMarket) || attribute.quality === 'REJECTED') continue;
     const list = grouped.get(attribute.field) ?? [];
     list.push(attribute);
     grouped.set(attribute.field, list);
@@ -113,16 +130,13 @@ function selectedPublishableAttributes(input: ReportInput, now: Date) {
     if (analysis.conflict) {
       conflicts.push({
         field,
-        candidates: candidates
-          .slice()
-          .sort((a, b) => a.source.key.localeCompare(b.source.key) || a.id.localeCompare(b.id))
-          .map((candidate) => ({
-            source: { key: candidate.source.key, name: candidate.source.name },
-            value: candidate.value,
-            quality: candidate.quality,
-            fetchedAt: candidate.fetchedAt.toISOString(),
-            mappingVersion: candidate.mappingVersion ?? null
-          }))
+        candidates: candidates.slice().sort((a, b) => a.source.key.localeCompare(b.source.key) || a.id.localeCompare(b.id)).map((candidate) => ({
+          source: { key: candidate.source.key, name: candidate.source.name },
+          value: candidate.value,
+          quality: candidate.quality,
+          fetchedAt: candidate.fetchedAt.toISOString(),
+          mappingVersion: candidate.mappingVersion ?? null
+        }))
       });
     }
   }
@@ -146,8 +160,9 @@ function eventDateSort(a: ReportInput['events'][number], b: ReportInput['events'
 export function serializeVehicleReport(input: ReportInput, now = new Date()) {
   const attributeSelection = selectedPublishableAttributes(input, now);
   const attributes = attributeSelection.selected;
+  const reportMarket = normalizeMarket(input.market) ?? normalizeMarket(attributes.get('market')?.value);
   const timeline = input.events
-    .filter((event) => sourceAllowed(event.source, now) && event.quality !== 'REJECTED')
+    .filter((event) => sourceAllowed(event.source, now, eventCapability(event.eventType), reportMarket ?? normalizeMarket(event.country)) && event.quality !== 'REJECTED')
     .sort(eventDateSort)
     .map((event) => ({
       id: event.id,
@@ -167,20 +182,17 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
 
   const provenance: Record<string, { source: ReportSource; sourceField: string | null; quality: string; fetchedAt: string; attributeId: string; conflict: boolean; mappingVersion: string | null }> = {};
   const vehicle: Record<string, string | number | null | Record<string, unknown>> = { vin: input.vin };
-
   for (const field of SPEC_FIELDS) {
     const attribute = attributes.get(field);
     if (!attribute) {
       vehicle[field] = null;
       continue;
     }
-
     const selectedValue = reportAttributeValue(field, attribute.value);
     if (selectedValue == null) {
       vehicle[field] = null;
       continue;
     }
-
     vehicle[field] = selectedValue;
     provenance[field] = {
       source: { key: attribute.source.key, name: attribute.source.name },
@@ -194,18 +206,12 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
   }
   vehicle.provenance = provenance;
 
-  const mileage = analyzeMileage(timeline.map((event) => ({
-    id: event.id,
-    eventDate: event.date,
-    mileageKm: event.mileageKm
-  })));
-
+  const mileage = analyzeMileage(timeline.map((event) => ({ id: event.id, eventDate: event.date, mileageKm: event.mileageKm })));
   const damageEvents = timeline.filter((event) => event.type === 'DAMAGE_RECORD');
   const inspectionEvents = timeline.filter((event) => event.type === 'INSPECTION');
   const sourceMap = new Map<string, ReportSource>();
   for (const event of timeline) sourceMap.set(event.source.key, event.source);
   for (const attribute of attributes.values()) sourceMap.set(attribute.source.key, { key: attribute.source.key, name: attribute.source.name });
-
   const hasSpecs = SPEC_FIELDS.some((field) => vehicle[field] != null);
   const status = timeline.length > 0 || hasSpecs ? 'DATA_AVAILABLE' : 'NO_DATA';
 
@@ -228,22 +234,13 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
   } as const;
 }
 
-function normalizeMarket(value: string | null | undefined): string | null {
-  const market = value?.trim().toUpperCase() ?? '';
-  return /^[A-Z]{2}$/.test(market) ? market : null;
-}
-
 async function reliableStoredMarket(vin: string, now = new Date()): Promise<string | null> {
   const vehicle = await db.vehicle.findUnique({
     where: { vin },
     select: {
       market: true,
       attributes: {
-        where: {
-          field: 'market',
-          conflict: false,
-          quality: { in: ['VERIFIED', 'TECHNICALLY_VALID'] }
-        },
+        where: { field: 'market', conflict: false, quality: { in: ['VERIFIED', 'TECHNICALLY_VALID'] } },
         orderBy: { fetchedAt: 'desc' },
         include: { source: { include: { licenses: true } } }
       }
@@ -251,13 +248,25 @@ async function reliableStoredMarket(vin: string, now = new Date()): Promise<stri
   });
   const canonical = normalizeMarket(vehicle?.market);
   if (!canonical) return null;
-
   const provenance = vehicle?.attributes.find((attribute) => {
-    return normalizeMarket(attribute.value) === canonical
-      && attribute.source.active
-      && Boolean(findLicenseForAction(attribute.source.licenses, 'STORE', now));
+    if (normalizeMarket(attribute.value) !== canonical || !attribute.source.active) return false;
+    return Boolean(
+      findLicenseForAction(attribute.source.licenses, 'STORE', now, { market: canonical, capability: 'REGISTRATION' })
+      ?? findLicenseForAction(attribute.source.licenses, 'STORE', now, { market: canonical, capability: 'VEHICLE_SPECS' })
+    );
   });
   return provenance ? canonical : null;
+}
+
+export function reliableMarketFromOutcomes(outcomes: readonly ProviderOutcome[]): string | null {
+  const candidates = outcomes
+    .filter((outcome) => outcome.status === 'SUCCESS')
+    .flatMap((outcome) => outcome.attributes)
+    .filter((attribute) => attribute.field === 'market' && (attribute.quality === 'VERIFIED' || attribute.quality === 'TECHNICALLY_VALID'))
+    .map((attribute) => normalizeMarket(attribute.value))
+    .filter((market): market is string => Boolean(market));
+  const unique = [...new Set(candidates)];
+  return unique.length === 1 ? unique[0] : null;
 }
 
 function replaceProviderOutcomes(initial: ProviderOutcome[], retry: ProviderOutcome[]): ProviderOutcome[] {
@@ -265,66 +274,84 @@ function replaceProviderOutcomes(initial: ProviderOutcome[], retry: ProviderOutc
   return initial.map((outcome) => retryByKey.get(outcome.providerKey) ?? outcome);
 }
 
-async function hydrateReportProviders(
-  vin: string,
-  providers: readonly VehicleDataProvider[],
-  options: VehicleReportOptions
-): Promise<ProviderOutcome[]> {
+async function hydrateReportProviders(vin: string, providers: readonly VehicleDataProvider[], options: VehicleReportOptions): Promise<ProviderOutcome[]> {
   if (options.hydrateProviders === false || providers.length === 0) return [];
 
-  const explicitMarketSupplied = Object.prototype.hasOwnProperty.call(options, 'market');
-  const explicitMarket = explicitMarketSupplied ? normalizeMarket(options.market) : null;
+  const trustedHint = options.marketHint?.trusted ? normalizeMarket(options.marketHint.market) : null;
+  const legacyExplicit = Object.prototype.hasOwnProperty.call(options, 'market') ? normalizeMarket(options.market) : null;
+  const explicitMarketSupplied = Boolean(trustedHint || legacyExplicit || Object.prototype.hasOwnProperty.call(options, 'market'));
+  const explicitMarket = trustedHint ?? legacyExplicit;
   const storedMarket = explicitMarketSupplied ? null : await reliableStoredMarket(vin);
-  // Empty string deliberately means "known to be unknown" to the orchestrator.
-  // This prevents fallback to Vehicle.market unless that canonical value has
-  // provenance accepted by reliableStoredMarket().
   const initialMarket = explicitMarketSupplied ? (explicitMarket ?? '') : (storedMarket ?? '');
 
-  const initial = await runVehicleProviders(vin, {
-    origin: 'PUBLIC_LOOKUP',
-    providers,
-    market: initialMarket
-  });
+  const initial = await runVehicleProviders(vin, { origin: 'PUBLIC_LOOKUP', providers, market: initialMarket });
   if (initialMarket) return initial;
 
-  const discoveredMarket = await reliableStoredMarket(vin);
+  const discoveredMarket = reliableMarketFromOutcomes(initial) ?? await reliableStoredMarket(vin);
   if (!discoveredMarket) return initial;
-
   const retryProviders = providers.filter((provider) => {
     const outcome = initial.find((item) => item.providerKey === provider.key);
     return outcome?.status === 'SKIPPED' && outcome.decisionReason === 'MARKET_UNKNOWN';
   });
   if (retryProviders.length === 0) return initial;
-
-  const retry = await runVehicleProviders(vin, {
-    origin: 'PUBLIC_LOOKUP',
-    providers: retryProviders,
-    market: discoveredMarket
-  });
+  const retry = await runVehicleProviders(vin, { origin: 'PUBLIC_LOOKUP', providers: retryProviders, market: discoveredMarket });
   return replaceProviderOutcomes(initial, retry);
+}
+
+function withEphemeralOutcomes(input: ReportInput, outcomes: readonly ProviderOutcome[]): ReportInput {
+  const ephemeral = outcomes.filter((outcome) => outcome.status === 'SUCCESS' && outcome.persisted !== true);
+  if (ephemeral.length === 0) return input;
+  const attributes = [...input.attributes];
+  const events = [...input.events];
+  for (const outcome of ephemeral) {
+    const source: SourceInput = {
+      key: outcome.providerKey,
+      name: outcome.providerName ?? outcome.providerKey,
+      licenses: [],
+      preauthorizedCommercialUse: true
+    };
+    outcome.attributes.forEach((attribute, index) => attributes.push({
+      id: `ephemeral:${outcome.providerKey}:attribute:${attribute.field}:${index}`,
+      field: attribute.field,
+      value: attribute.value,
+      sourceField: attribute.sourceField,
+      quality: attribute.quality,
+      fetchedAt: attribute.fetchedAt,
+      conflict: false,
+      mappingVersion: outcome.mappingVersion ?? null,
+      source
+    }));
+    outcome.events.forEach((event, index) => events.push({
+      id: `ephemeral:${outcome.providerKey}:event:${event.externalId}:${index}`,
+      eventType: event.eventType,
+      sourceEventType: event.sourceEventType ?? null,
+      eventDate: event.eventDate ?? null,
+      country: event.country ?? null,
+      mileageKm: event.mileageKm ?? null,
+      title: event.title,
+      description: event.description ?? null,
+      quality: event.quality,
+      rawPayload: event.rawPayload ? event.rawPayload as Prisma.JsonObject : null,
+      importedAt: new Date(),
+      conflict: false,
+      mappingVersion: outcome.mappingVersion ?? null,
+      source
+    }));
+  }
+  return { ...input, attributes, events };
 }
 
 export async function getVehicleReport(rawVin: string, options: VehicleReportOptions = {}) {
   const vin = normalizeVin(rawVin);
   if (!isValidVin(vin)) throw new Error('INVALID_VIN');
-
-  const selectedProviders = selectProviders({
-    providerKeys: options.providerKeys,
-    excludeProviderKeys: options.excludeProviderKeys
-  });
+  const selectedProviders = selectProviders({ providerKeys: options.providerKeys, excludeProviderKeys: options.excludeProviderKeys });
   const outcomes = await hydrateReportProviders(vin, selectedProviders, options);
 
   const vehicle = await db.vehicle.findUnique({
     where: { vin },
     include: {
-      attributes: {
-        include: { source: { include: { licenses: true } } },
-        orderBy: { fetchedAt: 'desc' }
-      },
-      events: {
-        include: { source: { include: { licenses: true } } },
-        orderBy: [{ eventDate: 'asc' }, { importedAt: 'asc' }]
-      }
+      attributes: { include: { source: { include: { licenses: true } } }, orderBy: { fetchedAt: 'desc' } },
+      events: { include: { source: { include: { licenses: true } } }, orderBy: [{ eventDate: 'asc' }, { importedAt: 'asc' }] }
     }
   });
 
@@ -336,25 +363,23 @@ export async function getVehicleReport(rawVin: string, options: VehicleReportOpt
     .filter((outcome) => outcome.status === 'FAILED' || (outcome.status === 'SKIPPED' && outcome.decisionReason !== 'FRESH_DATA'))
     .map((outcome) => ({ providerKey: outcome.providerKey, status: outcome.status, errorCode: outcome.errorCode ?? outcome.decisionReason ?? null }));
 
-  if (!vehicle) {
-    return {
-      vin,
-      found: false,
-      status: 'NO_DATA' as const,
-      vehicle: { vin, provenance: {} },
-      timeline: [],
-      events: [],
-      inspectionEvents: [],
-      mileageAnalysis: { status: 'INSUFFICIENT_DATA' as const, readings: [], findings: [] },
-      damageEvents: [],
-      attributeConflicts: [],
-      sources: [],
-      coverage,
-      providerIssues,
-      generatedAt: new Date().toISOString(),
-      disclaimer: 'Für diese FIN liegen derzeit keine veröffentlichbaren Daten vor. Das bedeutet nicht, dass das Fahrzeug unfallfrei ist oder der Kilometerstand korrekt ist.'
-    };
-  }
-
-  return { ...serializeVehicleReport(vehicle), coverage, providerIssues };
+  const base: ReportInput = vehicle ?? {
+    vin,
+    make: null,
+    model: null,
+    modelYear: null,
+    bodyClass: null,
+    fuelType: null,
+    engineDisplacement: null,
+    enginePowerKw: null,
+    transmission: null,
+    manufacturer: null,
+    plantCountry: null,
+    vehicleType: null,
+    market: null,
+    attributes: [],
+    events: []
+  };
+  const combined = withEphemeralOutcomes(base, outcomes);
+  return { ...serializeVehicleReport(combined), coverage, providerIssues };
 }

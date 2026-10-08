@@ -20,13 +20,8 @@ const provider: VehicleDataProvider = {
     return {
       cached: false,
       availability: 'DATA',
-      attributes: [{
-        field: 'make', value: 'BMW', sourceField: 'brand', rawValue: 'BMW', quality: 'VERIFIED', fetchedAt: new Date('2026-01-01')
-      }],
-      events: [{
-        externalId: 'odo-1', eventType: 'ODOMETER_READING', eventDate: new Date('2025-01-01'), mileageKm: 12_345,
-        title: 'Kilometerstand', quality: 'VERIFIED'
-      }]
+      attributes: [{ field: 'make', value: 'BMW', sourceField: 'brand', rawValue: 'BMW', quality: 'VERIFIED', fetchedAt: new Date('2026-01-01') }],
+      events: [{ externalId: 'odo-1', eventType: 'ODOMETER_READING', eventDate: new Date('2025-01-01'), mileageKm: 12_345, title: 'Kilometerstand', quality: 'VERIFIED' }]
     };
   }
 };
@@ -38,12 +33,8 @@ const contractProvider: VehicleDataProvider = {
   capabilities: ['REGISTRATION'],
   authType: 'CONTRACT',
   mappingVersion: 'contract-map-v1',
-  coverage: [{
-    market: 'DE', capabilities: ['REGISTRATION'], status: 'LIVE', requirements: ['LICENSE', 'CONTRACT']
-  }],
-  async lookup() {
-    return { cached: false, availability: 'NO_DATA', attributes: [], events: [] };
-  }
+  coverage: [{ market: 'DE', capabilities: ['REGISTRATION'], status: 'LIVE', requirements: ['LICENSE', 'CONTRACT'] }],
+  async lookup() { return { cached: false, availability: 'NO_DATA', attributes: [], events: [] }; }
 };
 
 async function cleanupSource(key: string) {
@@ -63,16 +54,35 @@ async function cleanup() {
   await db.vehicle.deleteMany({ where: { vin: VIN } });
 }
 
+async function createLicense(key: string, canStore = true) {
+  const source = await db.dataSource.upsert({ where: { key }, update: {}, create: { key, name: key } });
+  await db.sourceLicense.create({
+    data: {
+      sourceId: source.id,
+      licenseName: 'CI reviewed license',
+      canStore,
+      canRedistribute: true,
+      canCommercialize: true,
+      reviewedAt: new Date(),
+      reviewedBy: 'CI'
+    }
+  });
+  return source;
+}
+
 afterEach(async () => {
   if (process.env.DATABASE_URL) await cleanup();
 });
 
 describeDb('provider orchestrator persistence policy', () => {
-  it('creates one canonical vehicle but blocks provider data storage without STORE rights', async () => {
+  it('returns commercially licensed live data without persisting when STORE is forbidden', async () => {
     await cleanup();
-    await runVehicleProviders(VIN, { providers: [provider], origin: 'PUBLIC_LOOKUP' });
-    await runVehicleProviders(VIN, { providers: [provider], origin: 'PUBLIC_LOOKUP' });
+    await createLicense(SOURCE_KEY, false);
+    const outcome = await runVehicleProviders(VIN, { providers: [provider], origin: 'PUBLIC_LOOKUP' });
 
+    expect(outcome[0]).toMatchObject({ status: 'SUCCESS', persisted: false });
+    expect(outcome[0]?.attributes).toHaveLength(1);
+    expect(outcome[0]?.events).toHaveLength(1);
     expect(await db.vehicle.count({ where: { vin: VIN } })).toBe(1);
     const vehicle = await db.vehicle.findUniqueOrThrow({ where: { vin: VIN }, include: { attributes: true, events: true } });
     expect(vehicle.make).toBeNull();
@@ -82,24 +92,13 @@ describeDb('provider orchestrator persistence policy', () => {
 
   it('persists normalized data with mapping version and coverage after an explicit storage license exists', async () => {
     await cleanup();
-    await runVehicleProviders(VIN, { providers: [provider] });
-    const source = await db.dataSource.findUniqueOrThrow({ where: { key: SOURCE_KEY } });
-    await db.sourceLicense.create({
-      data: {
-        sourceId: source.id,
-        licenseName: 'CI reviewed license',
-        canStore: true,
-        canRedistribute: true,
-        canCommercialize: true,
-        reviewedAt: new Date(),
-        reviewedBy: 'CI'
-      }
-    });
-
+    await createLicense(SOURCE_KEY, true);
     const outcome = await runVehicleProviders(VIN, { providers: [provider] });
     expect(outcome[0]?.status).toBe('SUCCESS');
     expect(outcome[0]?.mappingVersion).toBe('ci-map-v1');
+    expect(outcome[0]?.persisted).toBe(true);
 
+    const source = await db.dataSource.findUniqueOrThrow({ where: { key: SOURCE_KEY } });
     const vehicle = await db.vehicle.findUniqueOrThrow({ where: { vin: VIN }, include: { attributes: true, events: true } });
     expect(vehicle.make).toBe('BMW');
     expect(vehicle.attributes).toHaveLength(1);
@@ -114,8 +113,8 @@ describeDb('provider orchestrator persistence policy', () => {
 
   it('treats persisted DB coverage as operative source-of-truth and never re-enables an unavailable source', async () => {
     await cleanup();
+    const source = await createLicense(SOURCE_KEY, true);
     await runVehicleProviders(VIN, { providers: [provider] });
-    const source = await db.dataSource.findUniqueOrThrow({ where: { key: SOURCE_KEY } });
     await db.providerCoverage.updateMany({ where: { sourceId: source.id }, data: { status: 'UNAVAILABLE' } });
 
     const outcome = await runVehicleProviders(VIN, { providers: [provider] });
@@ -127,31 +126,12 @@ describeDb('provider orchestrator persistence policy', () => {
 
   it('requires an independently active contract and license when both are configured', async () => {
     await cleanup();
-    await runVehicleProviders(VIN, { providers: [contractProvider], market: 'DE' });
-    const source = await db.dataSource.findUniqueOrThrow({ where: { key: CONTRACT_SOURCE_KEY } });
-    await db.sourceLicense.create({
-      data: {
-        sourceId: source.id,
-        licenseName: 'CI commercial license',
-        canStore: true,
-        canRedistribute: true,
-        canCommercialize: true,
-        reviewedAt: new Date(),
-        reviewedBy: 'CI'
-      }
-    });
-
+    const source = await createLicense(CONTRACT_SOURCE_KEY, true);
     const missingContract = await runVehicleProviders(VIN, { providers: [contractProvider], market: 'DE' });
     expect(missingContract[0]).toMatchObject({ status: 'SKIPPED', decisionReason: 'CONTRACT_REQUIRED' });
 
     await db.sourceContract.create({
-      data: {
-        sourceId: source.id,
-        name: 'CI partner agreement',
-        active: true,
-        reviewedAt: new Date(),
-        reviewedBy: 'CI'
-      }
+      data: { sourceId: source.id, name: 'CI partner agreement', active: true, reviewedAt: new Date(), reviewedBy: 'CI' }
     });
     const bothPresent = await runVehicleProviders(VIN, { providers: [contractProvider], market: 'DE' });
     expect(bothPresent[0]?.status).toBe('NO_DATA');
@@ -161,13 +141,10 @@ describeDb('provider orchestrator persistence policy', () => {
     expect(missingLicense[0]).toMatchObject({ status: 'SKIPPED', decisionReason: 'LICENSE_REQUIRED' });
   });
 
-  it('records provider failure without inventing history', async () => {
+  it('records provider failure without inventing history when reviewed commercial rights exist', async () => {
     await cleanup();
-    const failing: VehicleDataProvider = {
-      ...provider,
-      key: SOURCE_KEY,
-      async lookup() { throw new Error('UPSTREAM_DOWN'); }
-    };
+    await createLicense(SOURCE_KEY, true);
+    const failing: VehicleDataProvider = { ...provider, key: SOURCE_KEY, async lookup() { throw new Error('UPSTREAM_DOWN'); } };
 
     const outcome = await runVehicleProviders(VIN, { providers: [failing] });
     expect(outcome[0]).toMatchObject({ status: 'FAILED', errorCode: 'UPSTREAM_DOWN' });

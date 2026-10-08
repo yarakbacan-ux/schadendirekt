@@ -26,4 +26,11 @@ describe('contract policy', () => {
     expect(hasActiveContract([contract({ active: false }), contract()], now)).toBe(true);
     expect(hasActiveContract([contract({ active: false })], now)).toBe(false);
   });
+
+  it('enforces optional market and capability scopes', () => {
+    const scoped = contract({ markets: ['GB'], capabilities: ['INSPECTION'] });
+    expect(isContractActive(scoped, now, { market: 'GB', capability: 'INSPECTION' })).toBe(true);
+    expect(isContractActive(scoped, now, { market: 'DE', capability: 'INSPECTION' })).toBe(false);
+    expect(isContractActive(scoped, now, { market: 'GB', capability: 'DAMAGE' })).toBe(false);
+  });
 });

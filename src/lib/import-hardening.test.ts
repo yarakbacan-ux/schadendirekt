@@ -27,7 +27,9 @@ async function createSource(prefix: string) {
       canStore: true,
       canRedistribute: true,
       canCommercialize: true,
-      retentionDays: 1
+      retentionDays: 1,
+      reviewedAt: new Date(),
+      reviewedBy: 'CI'
     }
   });
   return source;
