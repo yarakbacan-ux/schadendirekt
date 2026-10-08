@@ -1,12 +1,15 @@
 import type { Prisma } from '@prisma/client';
 import { db } from '@/lib/db';
+import { analyzeFieldConflicts, compareConflictCandidates } from '@/lib/conflicts';
 import { findLicenseForAction, type LicenseLike } from '@/lib/license-policy';
 import { analyzeMileage } from '@/lib/mileage-analysis';
 import { runVehicleProviders } from '@/lib/providers/orchestrator';
+import { getProvider } from '@/lib/providers/registry';
 import { NHTSA_SOURCE_KEY } from '@/lib/nhtsa';
 import { DVSA_SOURCE_KEY } from '@/lib/providers/dvsa-provider';
 import { isValidVin, normalizeVin } from '@/lib/vin';
 import type { VehicleEventTypeName } from '@/lib/event-types';
+import type { ProviderOutcome } from '@/lib/providers/types';
 
 export type ReportSource = { key: string; name: string };
 
@@ -36,6 +39,7 @@ type ReportInput = {
     title: string;
     description: string | null;
     quality: string;
+    mappingVersion?: string;
     rawPayload: Prisma.JsonValue | null;
     importedAt: Date;
     source: SourceInput;
@@ -46,6 +50,7 @@ type ReportInput = {
     value: string;
     sourceField: string | null;
     quality: string;
+    mappingVersion?: string;
     fetchedAt: Date;
     source: SourceInput;
   }>;
@@ -63,14 +68,6 @@ function sourceAllowed(source: SourceInput, now: Date) {
   return Boolean(findLicenseForAction(source.licenses, 'COMMERCIALIZE', now));
 }
 
-function compareAttributes(a: ReportInput['attributes'][number], b: ReportInput['attributes'][number]) {
-  const time = b.fetchedAt.getTime() - a.fetchedAt.getTime();
-  if (time !== 0) return time;
-  const source = a.source.key.localeCompare(b.source.key);
-  if (source !== 0) return source;
-  return a.id.localeCompare(b.id);
-}
-
 function selectedPublishableAttributes(input: ReportInput, now: Date) {
   const grouped = new Map<string, ReportInput['attributes']>();
   for (const attribute of input.attributes) {
@@ -82,7 +79,7 @@ function selectedPublishableAttributes(input: ReportInput, now: Date) {
 
   const selected = new Map<string, ReportInput['attributes'][number]>();
   for (const [field, candidates] of grouped) {
-    candidates.sort(compareAttributes);
+    candidates.sort((a, b) => compareConflictCandidates(a, b));
     if (candidates[0]) selected.set(field, candidates[0]);
   }
   return selected;
@@ -102,10 +99,32 @@ function eventDateSort(a: ReportInput['events'][number], b: ReportInput['events'
   return aTime - bTime || a.importedAt.getTime() - b.importedAt.getTime();
 }
 
+function coverageFromOutcomes(outcomes: ProviderOutcome[]) {
+  return outcomes.map((outcome) => {
+    const provider = getProvider(outcome.providerKey);
+    return {
+      providerKey: outcome.providerKey,
+      providerName: provider?.name ?? outcome.providerKey,
+      decision: outcome.decision,
+      reason: outcome.decisionReason,
+      mappingVersion: outcome.mappingVersion,
+      configuredCoverage: provider?.coverage.map((item) => ({
+        marketCode: item.marketCode,
+        status: item.status,
+        capabilities: [...item.capabilities]
+      })) ?? []
+    };
+  });
+}
+
 export function serializeVehicleReport(input: ReportInput, now = new Date()) {
+  const publishableAttributes = input.attributes.filter((attribute) => sourceAllowed(attribute.source, now) && attribute.quality !== 'REJECTED');
   const attributes = selectedPublishableAttributes(input, now);
+  const conflicts = analyzeFieldConflicts(publishableAttributes);
+  const conflictingFields = new Set(conflicts.map((conflict) => conflict.field));
+
   const timeline = input.events
-    .filter((event) => sourceAllowed(event.source, now))
+    .filter((event) => sourceAllowed(event.source, now) && event.quality !== 'REJECTED')
     .sort(eventDateSort)
     .map((event) => ({
       id: event.id,
@@ -117,11 +136,12 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
       title: event.title,
       description: event.description,
       quality: event.quality,
+      mappingVersion: event.mappingVersion ?? 'legacy',
       details: event.rawPayload,
       source: { key: event.source.key, name: event.source.name }
     }));
 
-  const provenance: Record<string, { source: ReportSource; sourceField: string | null; quality: string; fetchedAt: string; attributeId: string }> = {};
+  const provenance: Record<string, { source: ReportSource; sourceField: string | null; quality: string; fetchedAt: string; attributeId: string; mappingVersion: string; conflict: boolean }> = {};
   const vehicle: Record<string, string | number | null | Record<string, unknown>> = { vin: input.vin };
 
   for (const field of SPEC_FIELDS) {
@@ -143,7 +163,9 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
       sourceField: attribute.sourceField,
       quality: attribute.quality,
       fetchedAt: attribute.fetchedAt.toISOString(),
-      attributeId: attribute.id
+      attributeId: attribute.id,
+      mappingVersion: attribute.mappingVersion ?? 'legacy',
+      conflict: conflictingFields.has(field)
     };
   }
   vehicle.provenance = provenance;
@@ -173,6 +195,7 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
     mileageAnalysis: mileage,
     damageEvents,
     inspectionEvents,
+    conflicts,
     sources: [...sourceMap.values()],
     generatedAt: now.toISOString(),
     disclaimer: status === 'NO_DATA'
@@ -193,8 +216,9 @@ export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?:
     ? await runVehicleProviders(vin, { origin: 'PUBLIC_LOOKUP', providerKeys })
     : [];
   const providerIssues = outcomes
-    .filter((outcome) => outcome.status !== 'SUCCESS')
-    .map((outcome) => ({ providerKey: outcome.providerKey, status: outcome.status, errorCode: outcome.errorCode }));
+    .filter((outcome) => outcome.decision === 'ERROR' || outcome.decision === 'NOT_CONFIGURED')
+    .map((outcome) => ({ providerKey: outcome.providerKey, status: outcome.status, errorCode: outcome.errorCode, decision: outcome.decision }));
+  const coverage = coverageFromOutcomes(outcomes);
 
   const vehicle = await db.vehicle.findUnique({
     where: { vin },
@@ -221,12 +245,14 @@ export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?:
       inspectionEvents: [],
       mileageAnalysis: { status: 'INSUFFICIENT_DATA' as const, readings: [], findings: [] },
       damageEvents: [],
+      conflicts: [],
       sources: [],
+      coverage,
       providerIssues,
       generatedAt: new Date().toISOString(),
       disclaimer: 'Für diese FIN liegen derzeit keine veröffentlichbaren Daten vor. Das bedeutet nicht, dass das Fahrzeug unfallfrei ist oder der Kilometerstand korrekt ist.'
     };
   }
 
-  return { ...serializeVehicleReport(vehicle), providerIssues };
+  return { ...serializeVehicleReport(vehicle), coverage, providerIssues };
 }
