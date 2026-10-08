@@ -23,7 +23,7 @@ export type NhtsaMappedSpecs = {
 
 export type NhtsaFlatResult = Record<string, unknown>;
 
-const FIELD_SOURCES: Record<keyof NhtsaMappedSpecs, string> = {
+export const NHTSA_FIELD_SOURCES: Record<keyof NhtsaMappedSpecs, string> = {
   make: 'Make',
   model: 'Model',
   modelYear: 'ModelYear',
@@ -134,8 +134,6 @@ export async function decodeVinWithNhtsa(rawVin: string): Promise<{ mapped: Nhts
 
   const flat = await fetchNhtsaFlatResult(vin);
 
-  // Runtime code never creates or approves a SourceLicense. A cache write is only allowed
-  // after an explicit reviewed license already permits STORE for this source.
   if (storageLicense) {
     await db.vinDecodeCache.upsert({
       where: { vin },
@@ -159,8 +157,6 @@ export async function hydrateVehicleFromNhtsa(rawVin: string, origin: VehicleOri
   const vin = normalizeVin(rawVin);
   if (!isValidVin(vin)) throw new Error('INVALID_VIN');
 
-  // The VIN itself is the canonical identity and may be stored for a valid public lookup.
-  // @unique(vin) plus upsert guarantees one Vehicle row per VIN under concurrent requests.
   const vehicle = await db.vehicle.upsert({
     where: { vin },
     update: {},
@@ -201,7 +197,7 @@ export async function hydrateVehicleFromNhtsa(rawVin: string, origin: VehicleOri
       where: { vehicleId_sourceId_field: { vehicleId: vehicle.id, sourceId: source.id, field } },
       update: {
         value: String(value),
-        sourceField: FIELD_SOURCES[field],
+        sourceField: NHTSA_FIELD_SOURCES[field],
         rawValue: String(value),
         quality: 'VERIFIED',
         fetchedAt: new Date()
@@ -211,7 +207,7 @@ export async function hydrateVehicleFromNhtsa(rawVin: string, origin: VehicleOri
         sourceId: source.id,
         field,
         value: String(value),
-        sourceField: FIELD_SOURCES[field],
+        sourceField: NHTSA_FIELD_SOURCES[field],
         rawValue: String(value),
         quality: 'VERIFIED'
       }
