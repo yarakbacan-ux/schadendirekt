@@ -1,19 +1,9 @@
 import { NextResponse } from 'next/server';
+import { hasValidAdminCredentials } from '@/lib/basic-auth';
 import { checksumPayload, importRecords, parseCsv, type ImportRecord } from '@/lib/imports';
 
-function isAuthorized(request: Request): boolean {
-  const auth = request.headers.get('authorization');
-  if (!auth?.startsWith('Basic ')) return false;
-  const decoded = atob(auth.slice(6));
-  const separator = decoded.indexOf(':');
-  return (
-    decoded.slice(0, separator) === process.env.ADMIN_EMAIL &&
-    decoded.slice(separator + 1) === process.env.ADMIN_PASSWORD
-  );
-}
-
 export async function POST(request: Request) {
-  if (!isAuthorized(request)) {
+  if (!hasValidAdminCredentials(request.headers.get('authorization'))) {
     return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
   }
 
