@@ -1,6 +1,8 @@
 import { Prisma, type VehicleOrigin } from '@prisma/client';
 import { db } from '@/lib/db';
 import { findLicenseForAction, retentionExpiry, type LicenseLike } from '@/lib/license-policy';
+import { analyzeAttributeConflict, groupAttributeConflicts } from '@/lib/providers/conflicts';
+import { evaluateProviderEligibility } from '@/lib/providers/eligibility';
 import { selectProviders } from '@/lib/providers/registry';
 import type {
   ProviderAttribute,
@@ -18,36 +20,112 @@ const CANONICAL_FIELDS = new Set([
 ]);
 const NUMERIC_FIELDS = new Set(['modelYear', 'engineDisplacement', 'enginePowerKw']);
 
+function parseCoverageDate(value: string | null | undefined) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 async function ensureProviderSource(provider: VehicleDataProvider) {
-  return db.dataSource.upsert({
+  const source = await db.dataSource.upsert({
     where: { key: provider.key },
     update: { name: provider.name, description: provider.description },
-    create: { key: provider.key, name: provider.name, description: provider.description, active: true },
-    include: { licenses: true }
+    create: { key: provider.key, name: provider.name, description: provider.description, active: true }
+  });
+
+  for (const coverage of provider.coverage ?? []) {
+    for (const capability of coverage.capabilities) {
+      await db.providerCoverage.upsert({
+        where: { sourceId_market_capability: { sourceId: source.id, market: coverage.market.toUpperCase(), capability } },
+        update: {
+          status: coverage.status,
+          earliestDate: parseCoverageDate(coverage.earliestDate),
+          latestDate: parseCoverageDate(coverage.latestDate),
+          requirements: coverage.requirements ? [...coverage.requirements] : Prisma.DbNull,
+          qualityNote: coverage.qualityNote ?? null,
+          authType: provider.authType ?? 'NONE',
+          freshnessSeconds: provider.refreshPolicy?.maxAgeSeconds ?? null,
+          mappingVersion: provider.mappingVersion ?? null
+        },
+        create: {
+          sourceId: source.id,
+          market: coverage.market.toUpperCase(),
+          capability,
+          status: coverage.status,
+          earliestDate: parseCoverageDate(coverage.earliestDate),
+          latestDate: parseCoverageDate(coverage.latestDate),
+          requirements: coverage.requirements ? [...coverage.requirements] : undefined,
+          qualityNote: coverage.qualityNote ?? null,
+          authType: provider.authType ?? 'NONE',
+          freshnessSeconds: provider.refreshPolicy?.maxAgeSeconds ?? null,
+          mappingVersion: provider.mappingVersion ?? null
+        }
+      });
+    }
+  }
+
+  return db.dataSource.findUniqueOrThrow({
+    where: { id: source.id },
+    include: {
+      licenses: true,
+      coverages: true,
+      providerRuns: {
+        where: { status: { in: ['SUCCESS', 'NO_DATA'] } },
+        orderBy: { finishedAt: 'desc' },
+        take: 1
+      }
+    }
   });
 }
 
-function canonicalVehicleData(attributes: ProviderAttribute[]): Prisma.VehicleUpdateInput {
-  const data: Record<string, string | number> = {};
-  for (const attribute of attributes) {
-    if (!CANONICAL_FIELDS.has(attribute.field)) continue;
-    if (NUMERIC_FIELDS.has(attribute.field)) {
-      const parsed = Number(attribute.value);
-      if (!Number.isFinite(parsed)) continue;
-      if (attribute.field === 'modelYear' && !Number.isInteger(parsed)) continue;
-      data[attribute.field] = parsed;
-    } else {
-      data[attribute.field] = attribute.value;
+function canonicalValue(field: string, value: string): string | number | null {
+  if (!NUMERIC_FIELDS.has(field)) return value;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  if (field === 'modelYear' && !Number.isInteger(parsed)) return null;
+  return parsed;
+}
+
+async function recomputeCanonicalVehicle(vehicleId: string) {
+  const attributes = await db.vehicleAttribute.findMany({
+    where: { vehicleId, field: { in: [...CANONICAL_FIELDS] } },
+    include: { source: { select: { key: true } } }
+  });
+
+  const conflicts = groupAttributeConflicts(attributes.map((attribute) => ({
+    id: attribute.id,
+    sourceKey: attribute.source.key,
+    field: attribute.field,
+    value: attribute.value,
+    quality: attribute.quality,
+    fetchedAt: attribute.fetchedAt
+  })));
+
+  await db.vehicleAttribute.updateMany({ where: { vehicleId }, data: { conflict: false } });
+  const data: Record<string, string | number | null> = {};
+  for (const field of CANONICAL_FIELDS) data[field] = null;
+
+  for (const group of conflicts) {
+    if (group.conflict) {
+      await db.vehicleAttribute.updateMany({
+        where: { id: { in: group.candidates.map((candidate) => candidate.id) } },
+        data: { conflict: true }
+      });
     }
+    if (!group.selected || !CANONICAL_FIELDS.has(group.field)) continue;
+    const value = canonicalValue(group.field, group.selected.value);
+    if (value != null) data[group.field] = value;
   }
-  return data as Prisma.VehicleUpdateInput;
+
+  await db.vehicle.update({ where: { id: vehicleId }, data: data as Prisma.VehicleUpdateInput });
 }
 
 async function persistProviderResult(
   vehicleId: string,
   sourceId: string,
   result: ProviderLookupResult,
-  storageLicense: LicenseLike
+  storageLicense: LicenseLike,
+  mappingVersion: string | null
 ) {
   const rawExpiresAt = retentionExpiry(storageLicense);
   const attributeWrites = result.attributes.map((attribute) => db.vehicleAttribute.upsert({
@@ -57,6 +135,7 @@ async function persistProviderResult(
       sourceField: attribute.sourceField,
       rawValue: attribute.rawValue ?? attribute.value,
       quality: attribute.quality,
+      mappingVersion,
       fetchedAt: attribute.fetchedAt
     },
     create: {
@@ -67,6 +146,7 @@ async function persistProviderResult(
       sourceField: attribute.sourceField,
       rawValue: attribute.rawValue ?? attribute.value,
       quality: attribute.quality,
+      mappingVersion,
       fetchedAt: attribute.fetchedAt
     }
   }));
@@ -83,6 +163,7 @@ async function persistProviderResult(
       title: event.title,
       description: event.description ?? null,
       quality: event.quality,
+      mappingVersion,
       rawPayload: event.rawPayload ? event.rawPayload as Prisma.InputJsonValue : Prisma.DbNull,
       rawPayloadExpiresAt: event.rawPayload ? rawExpiresAt : null
     },
@@ -98,6 +179,7 @@ async function persistProviderResult(
       title: event.title,
       description: event.description ?? null,
       quality: event.quality,
+      mappingVersion,
       rawPayload: event.rawPayload ? event.rawPayload as Prisma.InputJsonValue : undefined,
       rawPayloadExpiresAt: event.rawPayload ? rawExpiresAt : null
     }
@@ -105,11 +187,7 @@ async function persistProviderResult(
 
   if (attributeWrites.length || eventWrites.length) {
     await db.$transaction([...attributeWrites, ...eventWrites]);
-  }
-
-  const canonical = canonicalVehicleData(result.attributes);
-  if (Object.keys(canonical).length > 0) {
-    await db.vehicle.update({ where: { id: vehicleId }, data: canonical });
+    await recomputeCanonicalVehicle(vehicleId);
   }
 }
 
@@ -135,18 +213,37 @@ export function mergeProviderResults(outcomes: ProviderOutcome[]) {
   return { attributes, events };
 }
 
-async function recordSkipped(sourceId: string, vin: string, startedAt: Date, startedMs: number, reason: string) {
+async function recordDecision(
+  sourceId: string,
+  vin: string,
+  status: 'SKIPPED' | 'NOT_APPLICABLE',
+  startedAt: Date,
+  startedMs: number,
+  reason: string,
+  market: string | null,
+  mappingVersion: string | null
+) {
   await db.providerRun.create({
     data: {
       sourceId,
       vin,
-      status: 'SKIPPED',
+      status,
       cached: false,
       durationMs: Date.now() - startedMs,
-      errorCode: reason,
+      decisionReason: reason,
+      market,
+      mappingVersion,
       startedAt,
       finishedAt: new Date()
     }
+  });
+}
+
+async function markCoverageSuccessful(sourceId: string, provider: VehicleDataProvider, finishedAt: Date) {
+  const capabilities = new Set(provider.capabilities);
+  await db.providerCoverage.updateMany({
+    where: { sourceId, capability: { in: [...capabilities] } },
+    data: { lastSuccessfulAt: finishedAt }
   });
 }
 
@@ -157,6 +254,7 @@ export async function runVehicleProviders(
     providerKeys?: readonly string[];
     capabilities?: readonly ProviderCapability[];
     providers?: readonly VehicleDataProvider[];
+    market?: string | null;
   } = {}
 ): Promise<ProviderOutcome[]> {
   const vin = normalizeVin(rawVin);
@@ -167,6 +265,7 @@ export async function runVehicleProviders(
     update: {},
     create: { vin, origin: options.origin ?? 'PUBLIC_LOOKUP' }
   });
+  const market = (options.market ?? vehicle.market)?.trim().toUpperCase() || null;
 
   const providers = options.providers
     ? [...options.providers]
@@ -177,44 +276,74 @@ export async function runVehicleProviders(
     const source = await ensureProviderSource(provider);
     const startedAt = new Date();
     const startedMs = Date.now();
+    const configuration = provider.configurationStatus?.() ?? { configured: true, missing: [] };
+    const publicUse = (options.origin ?? 'PUBLIC_LOOKUP') === 'PUBLIC_LOOKUP' || options.origin === 'REPORT_PURCHASE';
+    const requiredLicense = publicUse
+      ? findLicenseForAction(source.licenses, 'COMMERCIALIZE', startedAt)
+      : findLicenseForAction(source.licenses, 'STORE', startedAt);
+    const eligibility = evaluateProviderEligibility({
+      provider,
+      sourceActive: source.active,
+      configured: configuration.configured,
+      hasRequiredLicense: Boolean(requiredLicense),
+      market,
+      lastSuccessfulAt: source.providerRuns[0]?.finishedAt ?? null,
+      now: startedAt
+    });
 
-    if (!source.active) {
-      await recordSkipped(source.id, vin, startedAt, startedMs, 'SOURCE_INACTIVE');
-      outcomes.push({ providerKey: provider.key, status: 'SKIPPED', cached: false, attributes: [], events: [], errorCode: 'SOURCE_INACTIVE' });
+    if (eligibility.action !== 'CALL') {
+      const status = eligibility.action === 'NOT_APPLICABLE' ? 'NOT_APPLICABLE' : 'SKIPPED';
+      await recordDecision(source.id, vin, status, startedAt, startedMs, eligibility.reason, market, provider.mappingVersion ?? null);
+      outcomes.push({
+        providerKey: provider.key,
+        status,
+        cached: false,
+        attributes: [],
+        events: [],
+        errorCode: null,
+        decisionReason: eligibility.reason,
+        market,
+        mappingVersion: provider.mappingVersion ?? null
+      });
       continue;
     }
 
-    const configuration = provider.configurationStatus?.();
-    if (configuration && !configuration.configured) {
-      await recordSkipped(source.id, vin, startedAt, startedMs, 'CREDENTIALS_MISSING');
-      outcomes.push({ providerKey: provider.key, status: 'SKIPPED', cached: false, attributes: [], events: [], errorCode: 'CREDENTIALS_MISSING' });
-      continue;
-    }
-
-    const storeLicense = findLicenseForAction(source.licenses, 'STORE');
+    const storeLicense = findLicenseForAction(source.licenses, 'STORE', startedAt);
     try {
-      const result = await provider.lookup(vin, { canStore: Boolean(storeLicense), now: startedAt });
-      if (storeLicense) await persistProviderResult(vehicle.id, source.id, result, storeLicense);
+      const result = await provider.lookup(vin, { canStore: Boolean(storeLicense), now: startedAt, market });
+      const availability = result.availability ?? (result.attributes.length > 0 || result.events.length > 0 ? 'DATA' : 'NO_DATA');
+      const mappingVersion = result.mappingVersion ?? provider.mappingVersion ?? null;
+      if (availability === 'DATA' && storeLicense) {
+        await persistProviderResult(vehicle.id, source.id, result, storeLicense, mappingVersion);
+      }
 
       const finishedAt = new Date();
+      const runStatus = availability === 'DATA' ? 'SUCCESS' : 'NO_DATA';
       await db.providerRun.create({
         data: {
           sourceId: source.id,
           vin,
-          status: 'SUCCESS',
+          status: runStatus,
           cached: result.cached,
           durationMs: Date.now() - startedMs,
+          decisionReason: 'ELIGIBLE',
+          market,
+          mappingVersion,
           startedAt,
           finishedAt
         }
       });
+      await markCoverageSuccessful(source.id, provider, finishedAt);
       outcomes.push({
         providerKey: provider.key,
-        status: 'SUCCESS',
+        status: runStatus,
         cached: result.cached,
         attributes: result.attributes,
         events: result.events,
-        errorCode: null
+        errorCode: null,
+        decisionReason: 'ELIGIBLE',
+        market,
+        mappingVersion
       });
     } catch (error) {
       const code = errorCode(error);
@@ -227,11 +356,14 @@ export async function runVehicleProviders(
           cached: false,
           durationMs: Date.now() - startedMs,
           errorCode: code,
+          decisionReason: 'UPSTREAM_ERROR',
+          market,
+          mappingVersion: provider.mappingVersion ?? null,
           startedAt,
           finishedAt
         }
       });
-      outcomes.push({ providerKey: provider.key, status: 'FAILED', cached: false, attributes: [], events: [], errorCode: code });
+      outcomes.push({ providerKey: provider.key, status: 'FAILED', cached: false, attributes: [], events: [], errorCode: code, decisionReason: 'UPSTREAM_ERROR', market, mappingVersion: provider.mappingVersion ?? null });
     }
   }
 

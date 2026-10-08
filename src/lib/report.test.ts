@@ -94,7 +94,7 @@ describe('serializeVehicleReport', () => {
     expect(report.vehicle.model).toBeNull();
   });
 
-  it('emits value and provenance from the same deterministically selected attribute', () => {
+  it('emits value and provenance from the same deterministic candidate and does not let recency decide truth', () => {
     const input = baseVehicle();
     input.make = 'CANONICAL-OLD';
     input.attributes.push({
@@ -117,15 +117,17 @@ describe('serializeVehicleReport', () => {
     });
 
     const report = serializeVehicleReport(input, new Date('2026-02-02T00:00:00Z'));
-    expect(report.vehicle.make).toBe('MERCEDES-BENZ');
+    expect(report.vehicle.make).toBe('BMW');
     expect(report.vehicle.provenance).toMatchObject({
       make: {
-        attributeId: 'attr-make-source-a',
-        source: { key: 'source-a', name: 'Source A' },
-        sourceField: 'manufacturer_name',
-        quality: 'VERIFIED'
+        attributeId: 'attr-make-nhtsa',
+        source: { key: 'nhtsa-vpic', name: 'NHTSA vPIC' },
+        sourceField: 'Make',
+        quality: 'VERIFIED',
+        conflict: true
       }
     });
+    expect(report.attributeConflicts.find((item) => item.field === 'make')?.candidates).toHaveLength(3);
   });
 
   it('never publishes the value of an unlicensed newer attribute', () => {

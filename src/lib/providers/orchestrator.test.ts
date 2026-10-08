@@ -12,9 +12,13 @@ const provider: VehicleDataProvider = {
   name: 'CI Provider',
   description: 'Test provider',
   capabilities: ['VEHICLE_SPECS', 'ODOMETER'],
+  authType: 'NONE',
+  mappingVersion: 'ci-map-v1',
+  coverage: [{ market: '*', capabilities: ['VEHICLE_SPECS', 'ODOMETER'], status: 'LIVE', allowUnknownMarket: true }],
   async lookup() {
     return {
       cached: false,
+      availability: 'DATA',
       attributes: [{
         field: 'make', value: 'BMW', sourceField: 'brand', rawValue: 'BMW', quality: 'VERIFIED', fetchedAt: new Date('2026-01-01')
       }],
@@ -55,7 +59,7 @@ describeDb('provider orchestrator persistence policy', () => {
     expect(vehicle.events).toHaveLength(0);
   });
 
-  it('persists normalized attributes and events after an explicit storage license exists', async () => {
+  it('persists normalized data with mapping version and coverage after an explicit storage license exists', async () => {
     await cleanup();
     await runVehicleProviders(VIN, { providers: [provider] });
     const source = await db.dataSource.findUniqueOrThrow({ where: { key: SOURCE_KEY } });
@@ -73,13 +77,18 @@ describeDb('provider orchestrator persistence policy', () => {
 
     const outcome = await runVehicleProviders(VIN, { providers: [provider] });
     expect(outcome[0]?.status).toBe('SUCCESS');
+    expect(outcome[0]?.mappingVersion).toBe('ci-map-v1');
 
     const vehicle = await db.vehicle.findUniqueOrThrow({ where: { vin: VIN }, include: { attributes: true, events: true } });
     expect(vehicle.make).toBe('BMW');
     expect(vehicle.attributes).toHaveLength(1);
-    expect(vehicle.attributes[0]).toMatchObject({ field: 'make', value: 'BMW', sourceField: 'brand' });
+    expect(vehicle.attributes[0]).toMatchObject({ field: 'make', value: 'BMW', sourceField: 'brand', mappingVersion: 'ci-map-v1' });
     expect(vehicle.events).toHaveLength(1);
-    expect(vehicle.events[0]).toMatchObject({ eventType: 'ODOMETER_READING', mileageKm: 12_345 });
+    expect(vehicle.events[0]).toMatchObject({ eventType: 'ODOMETER_READING', mileageKm: 12_345, mappingVersion: 'ci-map-v1' });
+
+    const coverage = await db.providerCoverage.findMany({ where: { sourceId: source.id } });
+    expect(coverage).toHaveLength(2);
+    expect(coverage.every((item) => item.mappingVersion === 'ci-map-v1')).toBe(true);
   });
 
   it('records provider failure without inventing history', async () => {
@@ -96,5 +105,6 @@ describeDb('provider orchestrator persistence policy', () => {
     const source = await db.dataSource.findUniqueOrThrow({ where: { key: SOURCE_KEY } });
     const run = await db.providerRun.findFirstOrThrow({ where: { sourceId: source.id }, orderBy: { finishedAt: 'desc' } });
     expect(run.status).toBe('FAILED');
+    expect(run.decisionReason).toBe('UPSTREAM_ERROR');
   });
 });
