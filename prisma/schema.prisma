@@ -178,22 +178,23 @@ model DataSource {
 }
 
 model ProviderCoverage {
-  id                String           @id @default(cuid())
-  sourceId          String
-  market            String
-  capability        String
-  status            CoverageStatus
-  earliestDate      DateTime?
-  latestDate        DateTime?
-  requirements      Json?
-  qualityNote       String?
-  authType          ProviderAuthType @default(NONE)
-  freshnessSeconds  Int?
-  mappingVersion    String?
-  lastSuccessfulAt  DateTime?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
-  source            DataSource       @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  id                 String           @id @default(cuid())
+  sourceId           String
+  market             String
+  capability         String
+  status             CoverageStatus
+  earliestDate       DateTime?
+  latestDate         DateTime?
+  requirements       Json?
+  qualityNote        String?
+  authType           ProviderAuthType @default(NONE)
+  freshnessSeconds   Int?
+  allowUnknownMarket Boolean          @default(false)
+  mappingVersion     String?
+  lastSuccessfulAt   DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  source             DataSource       @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
   @@unique([sourceId, market, capability])
   @@index([market, status])
