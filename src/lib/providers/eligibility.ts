@@ -10,6 +10,7 @@ export type EligibilityInput = {
   sourceActive: boolean;
   configured: boolean;
   hasRequiredLicense: boolean;
+  hasRequiredContract: boolean;
   market: string | null;
   lastSuccessfulAt?: Date | null;
   now?: Date;
@@ -49,14 +50,14 @@ export function evaluateProviderEligibility(input: EligibilityInput): Eligibilit
   if (!input.configured) return { action: 'SKIP', reason: 'CREDENTIALS_MISSING', coverage };
 
   const requirements = coverage?.requirements ?? [];
-  if (requirements.includes('CONTRACT') && !input.hasRequiredLicense) {
+  if (requirements.includes('CONTRACT') && !input.hasRequiredContract) {
     return { action: 'SKIP', reason: 'CONTRACT_REQUIRED', coverage };
   }
   if (requirements.includes('LICENSE') && !input.hasRequiredLicense) {
     return { action: 'SKIP', reason: 'LICENSE_REQUIRED', coverage };
   }
 
-  const maxAgeSeconds = input.provider.refreshPolicy?.maxAgeSeconds;
+  const maxAgeSeconds = coverage?.freshnessSeconds ?? input.provider.refreshPolicy?.maxAgeSeconds;
   if (maxAgeSeconds && maxAgeSeconds > 0 && input.lastSuccessfulAt) {
     const ageMs = now.getTime() - input.lastSuccessfulAt.getTime();
     if (ageMs >= 0 && ageMs < maxAgeSeconds * 1000) {
