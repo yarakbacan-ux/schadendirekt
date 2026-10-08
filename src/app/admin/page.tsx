@@ -7,6 +7,7 @@ import { getSession, roleAllowed } from '@/lib/auth';
 import { analyzeMileage } from '@/lib/mileage-analysis';
 import { VEHICLE_EVENT_TYPES } from '@/lib/event-types';
 import { listProviders } from '@/lib/providers/registry';
+import { findLicenseForAction } from '@/lib/license-policy';
 
 export const dynamic = 'force-dynamic';
 
@@ -69,6 +70,7 @@ export default async function AdminPage({
   }));
   const registeredProviders = listProviders();
   const providerByKey = new Map(registeredProviders.map((provider) => [provider.key, provider]));
+  const now = new Date();
 
   return (
     <main className="shell adminShell">
@@ -111,8 +113,8 @@ export default async function AdminPage({
           {registeredProviders.map((provider) => {
             const source = sources.find((item) => item.key === provider.key);
             const lastRun = source?.providerRuns[0];
-            const storeAllowed = source?.licenses.some((license) => license.canStore) ?? false;
-            const commercialAllowed = source?.licenses.some((license) => license.canRedistribute && license.canCommercialize) ?? false;
+            const storeAllowed = Boolean(source && findLicenseForAction(source.licenses, 'STORE', now));
+            const commercialAllowed = Boolean(source && findLicenseForAction(source.licenses, 'COMMERCIALIZE', now));
             return (
               <article key={provider.key}>
                 <strong>{provider.name}</strong>
