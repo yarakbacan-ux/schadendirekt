@@ -7,6 +7,13 @@ CREATE INDEX IF NOT EXISTS "ImportJob_sourceId_checksum_mappingVersion_idx"
 ALTER TABLE "ProviderCoverage"
   ADD COLUMN IF NOT EXISTS "allowUnknownMarket" BOOLEAN NOT NULL DEFAULT false;
 
+-- Phase 4 stored wildcard coverage before this flag existed. Preserve that
+-- already-reviewed wildcard behavior once, then treat DB coverage as operative
+-- source-of-truth. Runtime lookups do not overwrite this field afterwards.
+UPDATE "ProviderCoverage"
+SET "allowUnknownMarket" = true
+WHERE "market" = '*';
+
 CREATE TABLE IF NOT EXISTS "SourceContract" (
   "id" TEXT NOT NULL,
   "sourceId" TEXT NOT NULL,
