@@ -47,6 +47,12 @@ enum VehicleOrigin {
   SYSTEM
 }
 
+enum ProviderRunStatus {
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
 model Vehicle {
   id                 String             @id @default(cuid())
   vin                String             @unique @db.VarChar(17)
@@ -138,6 +144,24 @@ model DataSource {
   vehicleAttributes VehicleAttribute[]
   importJobs        ImportJob[]
   licenses          SourceLicense[]
+  providerRuns      ProviderRun[]
+}
+
+model ProviderRun {
+  id         String            @id @default(cuid())
+  sourceId   String
+  vin        String?           @db.VarChar(17)
+  status     ProviderRunStatus
+  cached     Boolean           @default(false)
+  durationMs Int
+  errorCode  String?
+  startedAt  DateTime          @default(now())
+  finishedAt DateTime          @default(now())
+  source     DataSource        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId, finishedAt])
+  @@index([status, finishedAt])
+  @@index([vin])
 }
 
 model ImportJob {
