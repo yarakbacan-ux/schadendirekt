@@ -26,7 +26,7 @@ export async function GET(request: Request, context: { params: Promise<{ vin: st
       );
     }
 
-    const report = await getVehicleReport(vin, { hydrateNhtsa: true });
+    const report = await getVehicleReport(vin);
     return NextResponse.json(
       { ...report, requestId: id },
       { headers: { 'x-request-id': id, 'cache-control': 'private, max-age=60' } }

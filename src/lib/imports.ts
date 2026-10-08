@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { db } from '@/lib/db';
 import { parseCsv } from '@/lib/csv';
+import { recomputeVehicleEventConflicts } from '@/lib/event-conflicts';
 import { eventFingerprint } from '@/lib/fingerprint';
 import { findLicenseForAction, retentionExpiry } from '@/lib/license-policy';
 import { validateImportRecord, type ImportRecord } from '@/lib/import-validation';
@@ -10,6 +11,7 @@ import { getImportStorage } from '@/lib/import-storage';
 import { calculateImportAccounting } from '@/lib/import-accounting';
 
 export type ImportFormat = 'JSON' | 'CSV';
+export const GENERIC_IMPORT_MAPPING_VERSION = 'generic-import-v1';
 
 type ErrorEntry = { index: number; message: string; rows?: number };
 type ClaimedJob = { id: string };
@@ -33,6 +35,12 @@ function parsePayload(raw: string, format: ImportFormat): unknown[] {
   return records;
 }
 
+function normalizedMappingVersion(value: string | undefined): string {
+  const version = value?.trim() || GENERIC_IMPORT_MAPPING_VERSION;
+  if (!/^[a-zA-Z0-9._:-]{1,100}$/.test(version)) throw new Error('INVALID_MAPPING_VERSION');
+  return version;
+}
+
 export function importObjectKey(sourceKey: string, jobId: string, checksum: string, format: ImportFormat): string {
   const safeSource = sourceKey.replace(/[^a-zA-Z0-9._-]/g, '_');
   return `${safeSource}/${jobId}-${checksum}.${format.toLowerCase()}`;
@@ -43,8 +51,10 @@ export async function queueImport(
   raw: string,
   format: ImportFormat,
   checksum = checksumPayload(raw),
-  fileName?: string
+  fileName?: string,
+  mappingVersion?: string
 ) {
+  const version = normalizedMappingVersion(mappingVersion);
   const source = await db.dataSource.findUnique({
     where: { key: sourceKey },
     include: { licenses: true }
@@ -56,14 +66,19 @@ export async function queueImport(
   if (license.retentionDays === 0) throw new Error('SOURCE_RETENTION_TOO_SHORT_FOR_ASYNC_IMPORT');
 
   const duplicate = await db.importJob.findFirst({
-    where: { sourceId: source.id, checksum, status: { in: ['PENDING', 'RUNNING', 'PARTIAL', 'COMPLETED'] } },
+    where: {
+      sourceId: source.id,
+      checksum,
+      mappingVersion: version,
+      status: { in: ['PENDING', 'RUNNING', 'PARTIAL', 'COMPLETED'] }
+    },
     orderBy: { createdAt: 'desc' }
   });
   if (duplicate) return duplicate;
 
   const expiresAt = retentionExpiry(license);
   const job = await db.importJob.create({
-    data: { sourceId: source.id, status: 'PENDING', format, checksum, fileName }
+    data: { sourceId: source.id, status: 'PENDING', format, checksum, fileName, mappingVersion: version }
   });
 
   const storage = getImportStorage();
@@ -92,7 +107,8 @@ async function processRecordBatch(
   sourceKey: string,
   sourceId: string,
   records: ImportRecord[],
-  rawExpiresAt: Date | null
+  rawExpiresAt: Date | null,
+  mappingVersion: string
 ): Promise<number> {
   const vins = [...new Set(records.map((record) => record.vin))];
   await db.vehicle.createMany({ data: vins.map((vin) => ({ vin })), skipDuplicates: true });
@@ -118,7 +134,8 @@ async function processRecordBatch(
           description: record.description,
           rawPayload: record,
           rawPayloadExpiresAt: rawExpiresAt,
-          quality: 'UNVERIFIED'
+          quality: 'UNVERIFIED',
+          mappingVersion
         },
         create: {
           vehicleId,
@@ -133,11 +150,14 @@ async function processRecordBatch(
           description: record.description,
           rawPayload: record,
           rawPayloadExpiresAt: rawExpiresAt,
-          quality: 'UNVERIFIED'
+          quality: 'UNVERIFIED',
+          mappingVersion
         }
       });
     })
   );
+
+  for (const vehicle of vehicles) await recomputeVehicleEventConflicts(vehicle.id);
   return records.length;
 }
 
@@ -230,7 +250,7 @@ export async function processImportJob(jobId: string, batchSize = 250) {
     const rawExpiresAt = retentionExpiry(license, job.createdAt);
     for (const batch of chunkArray(valid, batchSize)) {
       try {
-        written += await processRecordBatch(job.source.key, job.sourceId, batch, rawExpiresAt);
+        written += await processRecordBatch(job.source.key, job.sourceId, batch, rawExpiresAt, job.mappingVersion);
       } catch (error) {
         failedBatchRows += batch.length;
         errors.push({ index: -1, message: error instanceof Error ? error.message : 'BATCH_FAILED', rows: batch.length });

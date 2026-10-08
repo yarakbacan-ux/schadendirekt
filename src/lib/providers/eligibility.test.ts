@@ -19,12 +19,13 @@ const base = {
   sourceActive: true,
   configured: true,
   hasRequiredLicense: true,
+  hasRequiredContract: true,
   market: 'DE',
   now: new Date('2026-10-08T12:00:00Z')
 };
 
 describe('provider eligibility', () => {
-  it('calls only when market, configuration and license are eligible', () => {
+  it('calls only when market, configuration and required rights are eligible', () => {
     expect(evaluateProviderEligibility(base)).toMatchObject({ action: 'CALL', reason: 'ELIGIBLE' });
   });
 
@@ -46,20 +47,31 @@ describe('provider eligibility', () => {
     expect(evaluateProviderEligibility({ ...base, hasRequiredLicense: false })).toMatchObject({ action: 'SKIP', reason: 'LICENSE_REQUIRED' });
   });
 
-  it('treats a contractual coverage requirement as a hard eligibility gate', () => {
+  it('separates contract state from license state', () => {
     const contractProvider: VehicleDataProvider = {
       ...provider,
       key: 'contract-test',
-      coverage: [{ market: 'DE', capabilities: ['ODOMETER'], status: 'LIVE', requirements: ['CONTRACT'] }]
+      coverage: [{ market: 'DE', capabilities: ['ODOMETER'], status: 'LIVE', requirements: ['LICENSE', 'CONTRACT'] }]
     };
-    expect(evaluateProviderEligibility({ ...base, provider: contractProvider, hasRequiredLicense: false }))
+
+    expect(evaluateProviderEligibility({ ...base, provider: contractProvider, hasRequiredContract: false, hasRequiredLicense: true }))
       .toMatchObject({ action: 'SKIP', reason: 'CONTRACT_REQUIRED' });
+    expect(evaluateProviderEligibility({ ...base, provider: contractProvider, hasRequiredContract: true, hasRequiredLicense: false }))
+      .toMatchObject({ action: 'SKIP', reason: 'LICENSE_REQUIRED' });
+    expect(evaluateProviderEligibility({ ...base, provider: contractProvider, hasRequiredContract: true, hasRequiredLicense: true }))
+      .toMatchObject({ action: 'CALL', reason: 'ELIGIBLE' });
   });
 
-  it('uses freshness to avoid unnecessary live calls', () => {
-    expect(evaluateProviderEligibility({ ...base, lastSuccessfulAt: new Date('2026-10-08T11:30:00Z') }))
-      .toMatchObject({ action: 'SKIP', reason: 'FRESH_DATA' });
-    expect(evaluateProviderEligibility({ ...base, lastSuccessfulAt: new Date('2026-10-08T10:00:00Z') }))
+  it('uses operational coverage freshness before provider defaults', () => {
+    const operationalProvider: VehicleDataProvider = {
+      ...provider,
+      coverage: [{
+        market: 'DE', capabilities: ['ODOMETER'], status: 'LIVE', requirements: ['LICENSE'], freshnessSeconds: 60
+      }]
+    };
+    expect(evaluateProviderEligibility({ ...base, provider: operationalProvider, lastSuccessfulAt: new Date('2026-10-08T11:58:30Z') }))
       .toMatchObject({ action: 'CALL' });
+    expect(evaluateProviderEligibility({ ...base, provider: operationalProvider, lastSuccessfulAt: new Date('2026-10-08T11:59:30Z') }))
+      .toMatchObject({ action: 'SKIP', reason: 'FRESH_DATA' });
   });
 });

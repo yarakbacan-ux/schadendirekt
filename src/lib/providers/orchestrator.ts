@@ -1,15 +1,20 @@
 import { Prisma, type VehicleOrigin } from '@prisma/client';
 import { db } from '@/lib/db';
+import { hasActiveContract } from '@/lib/contract-policy';
+import { recomputeVehicleEventConflicts } from '@/lib/event-conflicts';
 import { findLicenseForAction, retentionExpiry, type LicenseLike } from '@/lib/license-policy';
 import { groupAttributeConflicts } from '@/lib/providers/conflicts';
 import { evaluateProviderEligibility } from '@/lib/providers/eligibility';
 import { selectProviders } from '@/lib/providers/registry';
 import type {
+  CoverageStatusName,
   ProviderAttribute,
   ProviderCapability,
+  ProviderCoverageDefinition,
   ProviderEvent,
   ProviderOutcome,
   ProviderLookupResult,
+  ProviderRequirement,
   VehicleDataProvider
 } from '@/lib/providers/types';
 import { isValidVin, normalizeVin } from '@/lib/vin';
@@ -19,11 +24,69 @@ const CANONICAL_FIELDS = new Set([
   'enginePowerKw', 'transmission', 'manufacturer', 'plantCountry', 'vehicleType', 'market'
 ]);
 const NUMERIC_FIELDS = new Set(['modelYear', 'engineDisplacement', 'enginePowerKw']);
+const REQUIREMENTS = new Set<ProviderRequirement>(['CREDENTIALS', 'LICENSE', 'CONTRACT']);
 
 function parseCoverageDate(value: string | null | undefined) {
   if (!value) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function parseRequirements(value: Prisma.JsonValue | null): ProviderRequirement[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is ProviderRequirement => typeof item === 'string' && REQUIREMENTS.has(item as ProviderRequirement));
+}
+
+function groupedCoverageStatus(statuses: CoverageStatusName[]): CoverageStatusName {
+  if (statuses.length === 0) return 'UNAVAILABLE';
+  if (statuses.every((status) => status === 'LIVE')) return 'LIVE';
+  if (statuses.every((status) => status === 'UNAVAILABLE')) return 'UNAVAILABLE';
+  if (statuses.every((status) => status === 'PLANNED')) return 'PLANNED';
+  return 'PARTIAL';
+}
+
+function operationalCoverage(
+  provider: VehicleDataProvider,
+  rows: Array<{
+    market: string;
+    capability: string;
+    status: CoverageStatusName;
+    earliestDate: Date | null;
+    latestDate: Date | null;
+    requirements: Prisma.JsonValue | null;
+    qualityNote: string | null;
+    freshnessSeconds: number | null;
+    allowUnknownMarket: boolean;
+  }>
+): ProviderCoverageDefinition[] {
+  const byMarket = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const market = row.market.trim().toUpperCase();
+    const group = byMarket.get(market) ?? [];
+    group.push(row);
+    byMarket.set(market, group);
+  }
+
+  return [...byMarket.entries()].map(([market, group]) => {
+    const capabilities = [...new Set(group.map((row) => row.capability))]
+      .filter((capability): capability is ProviderCapability => provider.capabilities.includes(capability as ProviderCapability));
+    const requirements = [...new Set(group.flatMap((row) => parseRequirements(row.requirements)))];
+    const earliest = group.map((row) => row.earliestDate).filter((value): value is Date => Boolean(value)).sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
+    const latest = group.map((row) => row.latestDate).filter((value): value is Date => Boolean(value)).sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+    const freshness = group.map((row) => row.freshnessSeconds).filter((value): value is number => value != null && value >= 0);
+    const qualityNotes = [...new Set(group.map((row) => row.qualityNote).filter((value): value is string => Boolean(value)))];
+    return {
+      market,
+      capabilities,
+      status: groupedCoverageStatus(group.map((row) => row.status)),
+      earliestDate: earliest?.toISOString() ?? null,
+      latestDate: latest?.toISOString() ?? null,
+      requirements,
+      qualityNote: qualityNotes.length > 0 ? qualityNotes.join(' | ') : null,
+      allowUnknownMarket: group.some((row) => row.allowUnknownMarket),
+      freshnessSeconds: freshness.length > 0 ? Math.min(...freshness) : null
+    };
+  });
 }
 
 async function ensureProviderSource(provider: VehicleDataProvider) {
@@ -33,41 +96,29 @@ async function ensureProviderSource(provider: VehicleDataProvider) {
     create: { key: provider.key, name: provider.name, description: provider.description, active: true }
   });
 
-  for (const coverage of provider.coverage ?? []) {
-    for (const capability of coverage.capabilities) {
-      await db.providerCoverage.upsert({
-        where: { sourceId_market_capability: { sourceId: source.id, market: coverage.market.toUpperCase(), capability } },
-        update: {
-          status: coverage.status,
-          earliestDate: parseCoverageDate(coverage.earliestDate),
-          latestDate: parseCoverageDate(coverage.latestDate),
-          requirements: coverage.requirements ? [...coverage.requirements] : Prisma.DbNull,
-          qualityNote: coverage.qualityNote ?? null,
-          authType: provider.authType ?? 'NONE',
-          freshnessSeconds: provider.refreshPolicy?.maxAgeSeconds ?? null,
-          mappingVersion: provider.mappingVersion ?? null
-        },
-        create: {
-          sourceId: source.id,
-          market: coverage.market.toUpperCase(),
-          capability,
-          status: coverage.status,
-          earliestDate: parseCoverageDate(coverage.earliestDate),
-          latestDate: parseCoverageDate(coverage.latestDate),
-          requirements: coverage.requirements ? [...coverage.requirements] : undefined,
-          qualityNote: coverage.qualityNote ?? null,
-          authType: provider.authType ?? 'NONE',
-          freshnessSeconds: provider.refreshPolicy?.maxAgeSeconds ?? null,
-          mappingVersion: provider.mappingVersion ?? null
-        }
-      });
-    }
+  const bootstrapRows = (provider.coverage ?? []).flatMap((coverage) => coverage.capabilities.map((capability) => ({
+    sourceId: source.id,
+    market: coverage.market.toUpperCase(),
+    capability,
+    status: coverage.status,
+    earliestDate: parseCoverageDate(coverage.earliestDate),
+    latestDate: parseCoverageDate(coverage.latestDate),
+    requirements: coverage.requirements ? [...coverage.requirements] : undefined,
+    qualityNote: coverage.qualityNote ?? null,
+    authType: provider.authType ?? 'NONE',
+    freshnessSeconds: coverage.freshnessSeconds ?? provider.refreshPolicy?.maxAgeSeconds ?? null,
+    allowUnknownMarket: coverage.allowUnknownMarket ?? false,
+    mappingVersion: provider.mappingVersion ?? null
+  })));
+  if (bootstrapRows.length > 0) {
+    await db.providerCoverage.createMany({ data: bootstrapRows, skipDuplicates: true });
   }
 
   return db.dataSource.findUniqueOrThrow({
     where: { id: source.id },
     include: {
       licenses: true,
+      contracts: true,
       coverages: true
     }
   });
@@ -183,6 +234,7 @@ async function persistProviderResult(
   if (attributeWrites.length || eventWrites.length) {
     await db.$transaction([...attributeWrites, ...eventWrites]);
     await recomputeCanonicalVehicle(vehicleId);
+    await recomputeVehicleEventConflicts(vehicleId);
   }
 }
 
@@ -248,16 +300,15 @@ async function latestSuccessfulRunForVin(sourceId: string, vin: string) {
 
 async function markCoverageSuccessful(
   sourceId: string,
-  provider: VehicleDataProvider,
   finishedAt: Date,
-  coverageMarket: string | null
+  coverage: ProviderCoverageDefinition | null
 ) {
-  if (!coverageMarket) return;
+  if (!coverage) return;
   await db.providerCoverage.updateMany({
     where: {
       sourceId,
-      market: coverageMarket.toUpperCase(),
-      capability: { in: [...provider.capabilities] }
+      market: coverage.market.toUpperCase(),
+      capability: { in: [...coverage.capabilities] }
     },
     data: { lastSuccessfulAt: finishedAt }
   });
@@ -290,6 +341,10 @@ export async function runVehicleProviders(
 
   for (const provider of providers) {
     const source = await ensureProviderSource(provider);
+    const providerWithOperationalCoverage: VehicleDataProvider = {
+      ...provider,
+      coverage: operationalCoverage(provider, source.coverages)
+    };
     const startedAt = new Date();
     const startedMs = Date.now();
     const configuration = provider.configurationStatus?.() ?? { configured: true, missing: [] };
@@ -297,12 +352,14 @@ export async function runVehicleProviders(
     const requiredLicense = publicUse
       ? findLicenseForAction(source.licenses, 'COMMERCIALIZE', startedAt)
       : findLicenseForAction(source.licenses, 'STORE', startedAt);
+    const activeContract = hasActiveContract(source.contracts, startedAt);
     const lastSuccessfulRun = await latestSuccessfulRunForVin(source.id, vin);
     const eligibility = evaluateProviderEligibility({
-      provider,
+      provider: providerWithOperationalCoverage,
       sourceActive: source.active,
       configured: configuration.configured,
       hasRequiredLicense: Boolean(requiredLicense),
+      hasRequiredContract: activeContract,
       market,
       lastSuccessfulAt: lastSuccessfulRun?.finishedAt ?? null,
       now: startedAt
@@ -350,7 +407,7 @@ export async function runVehicleProviders(
           finishedAt
         }
       });
-      await markCoverageSuccessful(source.id, provider, finishedAt, eligibility.coverage?.market ?? null);
+      await markCoverageSuccessful(source.id, finishedAt, eligibility.coverage);
       outcomes.push({
         providerKey: provider.key,
         status: runStatus,

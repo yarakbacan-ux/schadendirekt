@@ -5,9 +5,8 @@ import { analyzeMileage } from '@/lib/mileage-analysis';
 import { analyzeAttributeConflict } from '@/lib/providers/conflicts';
 import { runVehicleProviders } from '@/lib/providers/orchestrator';
 import { buildReportCoverage } from '@/lib/report-coverage';
-import { getProvider } from '@/lib/providers/registry';
-import { NHTSA_SOURCE_KEY } from '@/lib/nhtsa';
-import { DVSA_SOURCE_KEY } from '@/lib/providers/dvsa-provider';
+import { selectProviders } from '@/lib/providers/registry';
+import type { ProviderOutcome, VehicleDataProvider } from '@/lib/providers/types';
 import { isValidVin, normalizeVin } from '@/lib/vin';
 import type { VehicleEventTypeName } from '@/lib/event-types';
 
@@ -56,6 +55,19 @@ type ReportInput = {
     mappingVersion?: string | null;
     source: SourceInput;
   }>;
+};
+
+export type VehicleReportOptions = {
+  hydrateProviders?: boolean;
+  providerKeys?: readonly string[];
+  excludeProviderKeys?: readonly string[];
+  /**
+   * A trusted caller may supply a known market. If omitted, report hydration only
+   * uses a market that is backed by a stored, non-conflicting provenance record.
+   * Passing null explicitly means unknown and never falls back to an unproven
+   * canonical market value.
+   */
+  market?: string | null;
 };
 
 const SPEC_FIELDS = [
@@ -216,17 +228,91 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
   } as const;
 }
 
-export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?: boolean; hydrateDvsa?: boolean; market?: string | null } = {}) {
+function normalizeMarket(value: string | null | undefined): string | null {
+  const market = value?.trim().toUpperCase() ?? '';
+  return /^[A-Z]{2}$/.test(market) ? market : null;
+}
+
+async function reliableStoredMarket(vin: string, now = new Date()): Promise<string | null> {
+  const vehicle = await db.vehicle.findUnique({
+    where: { vin },
+    select: {
+      market: true,
+      attributes: {
+        where: {
+          field: 'market',
+          conflict: false,
+          quality: { in: ['VERIFIED', 'TECHNICALLY_VALID'] }
+        },
+        orderBy: { fetchedAt: 'desc' },
+        include: { source: { include: { licenses: true } } }
+      }
+    }
+  });
+  const canonical = normalizeMarket(vehicle?.market);
+  if (!canonical) return null;
+
+  const provenance = vehicle?.attributes.find((attribute) => {
+    return normalizeMarket(attribute.value) === canonical
+      && attribute.source.active
+      && Boolean(findLicenseForAction(attribute.source.licenses, 'STORE', now));
+  });
+  return provenance ? canonical : null;
+}
+
+function replaceProviderOutcomes(initial: ProviderOutcome[], retry: ProviderOutcome[]): ProviderOutcome[] {
+  const retryByKey = new Map(retry.map((outcome) => [outcome.providerKey, outcome]));
+  return initial.map((outcome) => retryByKey.get(outcome.providerKey) ?? outcome);
+}
+
+async function hydrateReportProviders(
+  vin: string,
+  providers: readonly VehicleDataProvider[],
+  options: VehicleReportOptions
+): Promise<ProviderOutcome[]> {
+  if (options.hydrateProviders === false || providers.length === 0) return [];
+
+  const explicitMarketSupplied = Object.prototype.hasOwnProperty.call(options, 'market');
+  const explicitMarket = explicitMarketSupplied ? normalizeMarket(options.market) : null;
+  const storedMarket = explicitMarketSupplied ? null : await reliableStoredMarket(vin);
+  // Empty string deliberately means "known to be unknown" to the orchestrator.
+  // This prevents fallback to Vehicle.market unless that canonical value has
+  // provenance accepted by reliableStoredMarket().
+  const initialMarket = explicitMarketSupplied ? (explicitMarket ?? '') : (storedMarket ?? '');
+
+  const initial = await runVehicleProviders(vin, {
+    origin: 'PUBLIC_LOOKUP',
+    providers,
+    market: initialMarket
+  });
+  if (initialMarket) return initial;
+
+  const discoveredMarket = await reliableStoredMarket(vin);
+  if (!discoveredMarket) return initial;
+
+  const retryProviders = providers.filter((provider) => {
+    const outcome = initial.find((item) => item.providerKey === provider.key);
+    return outcome?.status === 'SKIPPED' && outcome.decisionReason === 'MARKET_UNKNOWN';
+  });
+  if (retryProviders.length === 0) return initial;
+
+  const retry = await runVehicleProviders(vin, {
+    origin: 'PUBLIC_LOOKUP',
+    providers: retryProviders,
+    market: discoveredMarket
+  });
+  return replaceProviderOutcomes(initial, retry);
+}
+
+export async function getVehicleReport(rawVin: string, options: VehicleReportOptions = {}) {
   const vin = normalizeVin(rawVin);
   if (!isValidVin(vin)) throw new Error('INVALID_VIN');
 
-  const providerKeys: string[] = [];
-  if (options.hydrateNhtsa !== false) providerKeys.push(NHTSA_SOURCE_KEY);
-  if (options.hydrateDvsa !== false) providerKeys.push(DVSA_SOURCE_KEY);
-
-  const outcomes = providerKeys.length > 0
-    ? await runVehicleProviders(vin, { origin: 'PUBLIC_LOOKUP', providerKeys, market: options.market ?? null })
-    : [];
+  const selectedProviders = selectProviders({
+    providerKeys: options.providerKeys,
+    excludeProviderKeys: options.excludeProviderKeys
+  });
+  const outcomes = await hydrateReportProviders(vin, selectedProviders, options);
 
   const vehicle = await db.vehicle.findUnique({
     where: { vin },
@@ -242,7 +328,6 @@ export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?:
     }
   });
 
-  const selectedProviders = providerKeys.map((key) => getProvider(key)).filter((provider): provider is NonNullable<typeof provider> => Boolean(provider));
   const persistedSourceKeys = new Set<string>();
   for (const attribute of vehicle?.attributes ?? []) persistedSourceKeys.add(attribute.source.key);
   for (const event of vehicle?.events ?? []) persistedSourceKeys.add(event.source.key);

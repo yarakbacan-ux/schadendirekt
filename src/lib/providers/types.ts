@@ -27,6 +27,7 @@ export type ProviderCoverageDefinition = {
   requirements?: readonly ProviderRequirement[];
   qualityNote?: string | null;
   allowUnknownMarket?: boolean;
+  freshnessSeconds?: number | null;
 };
 
 export type ProviderRefreshPolicy = {
