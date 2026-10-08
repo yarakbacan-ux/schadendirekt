@@ -38,7 +38,7 @@ export function buildReportCoverage(
     else if (outcome.status === 'NO_DATA') state = 'NO_DATA';
     else if (outcome.status === 'NOT_APPLICABLE') state = 'NOT_APPLICABLE';
     else if (outcome.status === 'FAILED') state = 'ERROR';
-    else if (outcome.decisionReason === 'CREDENTIALS_MISSING' || outcome.decisionReason === 'LICENSE_REQUIRED') state = 'NOT_CONFIGURED';
+    else if (['CREDENTIALS_MISSING', 'LICENSE_REQUIRED', 'CONTRACT_REQUIRED'].includes(outcome.decisionReason ?? '')) state = 'NOT_CONFIGURED';
     else if (outcome.decisionReason === 'FRESH_DATA' && persistedSourceKeys.has(provider.key)) state = 'DATA';
     else state = 'SKIPPED';
 

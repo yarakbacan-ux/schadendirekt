@@ -36,9 +36,24 @@ describe('provider eligibility', () => {
     expect(evaluateProviderEligibility({ ...base, market: 'FR' })).toMatchObject({ action: 'NOT_APPLICABLE', reason: 'MARKET_NOT_COVERED' });
   });
 
+  it('reports market inapplicability before missing credentials', () => {
+    expect(evaluateProviderEligibility({ ...base, market: 'FR', configured: false }))
+      .toMatchObject({ action: 'NOT_APPLICABLE', reason: 'MARKET_NOT_COVERED' });
+  });
+
   it('blocks missing credentials and license before a live call', () => {
     expect(evaluateProviderEligibility({ ...base, configured: false })).toMatchObject({ action: 'SKIP', reason: 'CREDENTIALS_MISSING' });
     expect(evaluateProviderEligibility({ ...base, hasRequiredLicense: false })).toMatchObject({ action: 'SKIP', reason: 'LICENSE_REQUIRED' });
+  });
+
+  it('treats a contractual coverage requirement as a hard eligibility gate', () => {
+    const contractProvider: VehicleDataProvider = {
+      ...provider,
+      key: 'contract-test',
+      coverage: [{ market: 'DE', capabilities: ['ODOMETER'], status: 'LIVE', requirements: ['CONTRACT'] }]
+    };
+    expect(evaluateProviderEligibility({ ...base, provider: contractProvider, hasRequiredLicense: false }))
+      .toMatchObject({ action: 'SKIP', reason: 'CONTRACT_REQUIRED' });
   });
 
   it('uses freshness to avoid unnecessary live calls', () => {

@@ -34,10 +34,8 @@ function coverageFor(provider: VehicleDataProvider, market: string | null): Prov
 export function evaluateProviderEligibility(input: EligibilityInput): EligibilityDecision {
   const now = input.now ?? new Date();
   const market = normalizedMarket(input.market);
-  const configured = input.configured;
 
   if (!input.sourceActive) return { action: 'SKIP', reason: 'SOURCE_INACTIVE', coverage: null };
-  if (!configured) return { action: 'SKIP', reason: 'CREDENTIALS_MISSING', coverage: null };
 
   const coverage = coverageFor(input.provider, market);
   if ((input.provider.coverage?.length ?? 0) > 0 && !coverage) {
@@ -48,8 +46,13 @@ export function evaluateProviderEligibility(input: EligibilityInput): Eligibilit
   if (coverage?.status === 'PLANNED') return { action: 'NOT_APPLICABLE', reason: 'COVERAGE_PLANNED', coverage };
   if (coverage?.status === 'UNAVAILABLE') return { action: 'NOT_APPLICABLE', reason: 'COVERAGE_UNAVAILABLE', coverage };
 
-  const requiresLicense = coverage?.requirements?.includes('LICENSE') ?? false;
-  if (requiresLicense && !input.hasRequiredLicense) {
+  if (!input.configured) return { action: 'SKIP', reason: 'CREDENTIALS_MISSING', coverage };
+
+  const requirements = coverage?.requirements ?? [];
+  if (requirements.includes('CONTRACT') && !input.hasRequiredLicense) {
+    return { action: 'SKIP', reason: 'CONTRACT_REQUIRED', coverage };
+  }
+  if (requirements.includes('LICENSE') && !input.hasRequiredLicense) {
     return { action: 'SKIP', reason: 'LICENSE_REQUIRED', coverage };
   }
 
