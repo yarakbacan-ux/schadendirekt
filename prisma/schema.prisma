@@ -16,6 +16,7 @@ enum UserRole {
 enum ImportStatus {
   PENDING
   RUNNING
+  PARTIAL
   COMPLETED
   FAILED
 }
@@ -38,26 +39,28 @@ model Vehicle {
 }
 
 model VehicleEvent {
-  id             String       @id @default(cuid())
-  vehicleId      String
-  sourceId       String
-  externalId     String?
-  eventType      String
-  eventDate      DateTime?
-  country        String?      @db.VarChar(2)
-  mileageKm      Int?
-  title          String
-  description    String?
-  rawPayload     Json?
-  quality        DataQuality  @default(UNVERIFIED)
-  occurredAtText String?
-  importedAt     DateTime     @default(now())
-  vehicle        Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
-  source         DataSource   @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+  id                  String       @id @default(cuid())
+  vehicleId           String
+  sourceId            String
+  externalId          String?
+  eventType           String
+  eventDate           DateTime?
+  country             String?      @db.VarChar(2)
+  mileageKm           Int?
+  title               String
+  description         String?
+  rawPayload          Json?
+  rawPayloadExpiresAt DateTime?
+  quality             DataQuality  @default(UNVERIFIED)
+  occurredAtText      String?
+  importedAt          DateTime     @default(now())
+  vehicle             Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  source              DataSource   @relation(fields: [sourceId], references: [id], onDelete: Restrict)
 
   @@unique([sourceId, externalId])
   @@index([vehicleId, eventDate])
   @@index([sourceId])
+  @@index([rawPayloadExpiresAt])
 }
 
 model DataSource {
@@ -74,22 +77,36 @@ model DataSource {
 }
 
 model ImportJob {
-  id          String       @id @default(cuid())
+  id          String        @id @default(cuid())
   sourceId    String
-  status      ImportStatus @default(PENDING)
+  status      ImportStatus  @default(PENDING)
   format      String
   fileName    String?
   checksum    String?
-  rowsRead    Int          @default(0)
-  rowsWritten Int          @default(0)
+  rowsRead    Int           @default(0)
+  rowsWritten Int           @default(0)
+  rowsFailed  Int           @default(0)
   errorLog    Json?
   startedAt   DateTime?
   finishedAt  DateTime?
-  createdAt   DateTime     @default(now())
-  source      DataSource   @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+  createdAt   DateTime      @default(now())
+  source      DataSource    @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+  payload     ImportPayload?
 
   @@index([sourceId, createdAt])
   @@index([status])
+  @@index([checksum])
+}
+
+model ImportPayload {
+  id          String    @id @default(cuid())
+  importJobId String    @unique
+  content     String    @db.Text
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+  importJob   ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
 }
 
 model SourceLicense {
@@ -110,14 +127,30 @@ model SourceLicense {
   source               DataSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
   @@index([sourceId])
+  @@index([validFrom, validUntil])
 }
 
 model User {
-  id           String   @id @default(cuid())
-  email        String   @unique
+  id           String    @id @default(cuid())
+  email        String    @unique
   passwordHash String
-  role         UserRole @default(VIEWER)
-  active       Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  role         UserRole  @default(VIEWER)
+  active       Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  sessions     Session[]
+}
+
+model Session {
+  id            String   @id @default(cuid())
+  userId        String
+  tokenHash     String   @unique
+  csrfTokenHash String
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  lastSeenAt    DateTime @default(now())
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }

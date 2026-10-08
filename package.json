@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:migrate": "prisma migrate deploy",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "user:create-admin": "node scripts/create-admin.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.16.2",
