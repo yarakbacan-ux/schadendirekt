@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { db } from '@/lib/db';
 import { parseCsv } from '@/lib/csv';
 import { eventFingerprint } from '@/lib/fingerprint';
@@ -12,6 +13,7 @@ export function checksumPayload(payload: string): string {
 }
 
 export function chunkArray<T>(items: T[], size: number): T[][] {
+  if (!Number.isInteger(size) || size <= 0) throw new Error('INVALID_BATCH_SIZE');
   const chunks: T[][] = [];
   for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
   return chunks;
@@ -53,9 +55,7 @@ export async function queueImport(
     const job = await tx.importJob.create({
       data: { sourceId: source.id, status: 'PENDING', format, checksum, fileName }
     });
-    await tx.importPayload.create({
-      data: { importJobId: job.id, content: raw, expiresAt }
-    });
+    await tx.importPayload.create({ data: { importJobId: job.id, content: raw, expiresAt } });
     return job;
   });
 }
@@ -119,10 +119,12 @@ export async function processImportJob(jobId: string, batchSize = 250) {
 
   const license = findLicenseForAction(job.source.licenses, 'STORE');
   if (!license) {
-    return db.importJob.update({
+    const result = await db.importJob.update({
       where: { id: job.id },
-      data: { status: 'FAILED', finishedAt: new Date(), errorLog: [{ message: 'SOURCE_STORAGE_NOT_LICENSED' }] }
+      data: { status: 'FAILED', finishedAt: new Date(), rowsFailed: 1, errorLog: [{ message: 'SOURCE_STORAGE_NOT_LICENSED' }] }
     });
+    await db.importPayload.deleteMany({ where: { importJobId: job.id } });
+    return result;
   }
 
   await db.importJob.update({ where: { id: job.id }, data: { status: 'RUNNING', startedAt: new Date() } });
@@ -146,27 +148,20 @@ export async function processImportJob(jobId: string, batchSize = 250) {
       try {
         written += await processRecordBatch(job.source.key, job.sourceId, batch, rawExpiresAt);
       } catch (error) {
-        for (const record of batch) {
-          errors.push({ index: inputs.indexOf(record), message: error instanceof Error ? error.message : 'BATCH_FAILED' });
-        }
+        errors.push({ index: -1, message: error instanceof Error ? error.message : 'BATCH_FAILED' });
       }
     }
 
     const failed = errors.length;
     const status = failed === 0 ? 'COMPLETED' : written === 0 ? 'FAILED' : 'PARTIAL';
-    return db.importJob.update({
+    const result = await db.importJob.update({
       where: { id: job.id },
-      data: {
-        status,
-        rowsRead: inputs.length,
-        rowsWritten: written,
-        rowsFailed: failed,
-        errorLog: errors,
-        finishedAt: new Date()
-      }
+      data: { status, rowsRead: inputs.length, rowsWritten: written, rowsFailed: failed, errorLog: errors, finishedAt: new Date() }
     });
+    await db.importPayload.deleteMany({ where: { importJobId: job.id } });
+    return result;
   } catch (error) {
-    return db.importJob.update({
+    const result = await db.importJob.update({
       where: { id: job.id },
       data: {
         status: 'FAILED',
@@ -175,6 +170,8 @@ export async function processImportJob(jobId: string, batchSize = 250) {
         finishedAt: new Date()
       }
     });
+    await db.importPayload.deleteMany({ where: { importJobId: job.id } });
+    return result;
   }
 }
 
@@ -193,8 +190,8 @@ export async function processPendingImportJobs(limit = 1, batchSize = 250) {
 
 export async function cleanupExpiredRawData(now = new Date()) {
   await db.vehicleEvent.updateMany({
-    where: { rawPayloadExpiresAt: { lte: now }, rawPayload: { not: undefined } },
-    data: { rawPayload: undefined }
+    where: { rawPayloadExpiresAt: { lte: now } },
+    data: { rawPayload: Prisma.DbNull }
   });
   await db.importPayload.deleteMany({ where: { expiresAt: { lte: now } } });
 }
