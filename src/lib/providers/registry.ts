@@ -1,7 +1,8 @@
+import { dvsaProvider } from '@/lib/providers/dvsa-provider';
 import { nhtsaProvider } from '@/lib/providers/nhtsa-provider';
 import type { ProviderCapability, VehicleDataProvider } from '@/lib/providers/types';
 
-const providers: VehicleDataProvider[] = [nhtsaProvider];
+const providers: VehicleDataProvider[] = [nhtsaProvider, dvsaProvider];
 
 export function listProviders(): readonly VehicleDataProvider[] {
   return providers;
