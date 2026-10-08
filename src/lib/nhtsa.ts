@@ -117,7 +117,7 @@ async function ensureNhtsaSource() {
 }
 
 async function fetchNhtsaFlatResult(vin: string): Promise<NhtsaFlatResult> {
-  const limited = rateLimit('nhtsa-vpic:global', 500, 60_000);
+  const limited = await rateLimit('nhtsa-vpic:global', 500, 60_000);
   if (!limited.allowed) throw new Error('NHTSA_RATE_LIMITED');
 
   const controller = new AbortController();
