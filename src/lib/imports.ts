@@ -6,8 +6,12 @@ import { eventFingerprint } from '@/lib/fingerprint';
 import { findLicenseForAction, retentionExpiry } from '@/lib/license-policy';
 import { validateImportRecord, type ImportRecord } from '@/lib/import-validation';
 import { normalizeEventType } from '@/lib/event-types';
+import { getImportStorage } from '@/lib/import-storage';
 
 export type ImportFormat = 'JSON' | 'CSV';
+
+type ErrorEntry = { index: number; message: string; rows?: number };
+type ClaimedJob = { id: string };
 
 export function checksumPayload(payload: string): string {
   return createHash('sha256').update(payload).digest('hex');
@@ -26,6 +30,11 @@ function parsePayload(raw: string, format: ImportFormat): unknown[] {
   const records = Array.isArray(parsed) ? parsed : parsed.records;
   if (!Array.isArray(records)) throw new Error('INVALID_IMPORT_PAYLOAD');
   return records;
+}
+
+export function importObjectKey(sourceKey: string, jobId: string, checksum: string, format: ImportFormat): string {
+  const safeSource = sourceKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `${safeSource}/${jobId}-${checksum}.${format.toLowerCase()}`;
 }
 
 export async function queueImport(
@@ -52,13 +61,30 @@ export async function queueImport(
   if (duplicate) return duplicate;
 
   const expiresAt = retentionExpiry(license);
-  return db.$transaction(async (tx) => {
-    const job = await tx.importJob.create({
-      data: { sourceId: source.id, status: 'PENDING', format, checksum, fileName }
-    });
-    await tx.importPayload.create({ data: { importJobId: job.id, content: raw, expiresAt } });
-    return job;
+  const job = await db.importJob.create({
+    data: { sourceId: source.id, status: 'PENDING', format, checksum, fileName }
   });
+
+  const storage = getImportStorage();
+  const key = importObjectKey(source.key, job.id, checksum, format);
+  try {
+    const stored = await storage.put(key, raw);
+    await db.importObject.create({
+      data: {
+        importJobId: job.id,
+        provider: stored.provider,
+        storageKey: stored.key,
+        sizeBytes: stored.sizeBytes,
+        checksum,
+        expiresAt
+      }
+    });
+    return job;
+  } catch (error) {
+    await storage.delete(key).catch(() => undefined);
+    await db.importJob.delete({ where: { id: job.id } }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function processRecordBatch(
@@ -114,78 +140,136 @@ async function processRecordBatch(
   return records.length;
 }
 
+async function loadJobPayload(job: {
+  object: { provider: string; storageKey: string } | null;
+  payload: { content: string } | null;
+}): Promise<string> {
+  if (job.object) {
+    const storage = getImportStorage();
+    if (job.object.provider !== storage.provider) throw new Error('IMPORT_STORAGE_PROVIDER_UNAVAILABLE');
+    return storage.readText(job.object.storageKey);
+  }
+  if (job.payload) return job.payload.content;
+  throw new Error('IMPORT_JOB_OR_PAYLOAD_NOT_FOUND');
+}
+
+async function disposeJobPayload(job: {
+  id: string;
+  object: { provider: string; storageKey: string } | null;
+  payload: { importJobId: string } | null;
+}) {
+  if (job.object) {
+    const storage = getImportStorage();
+    if (job.object.provider === storage.provider) {
+      await storage.delete(job.object.storageKey).catch(() => undefined);
+    }
+    await db.importObject.updateMany({
+      where: { importJobId: job.id, deletedAt: null },
+      data: { deletedAt: new Date() }
+    });
+  }
+  if (job.payload) await db.importPayload.deleteMany({ where: { importJobId: job.id } });
+}
+
+export async function claimPendingImportJobs(limit = 1): Promise<ClaimedJob[]> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('INVALID_CLAIM_LIMIT');
+
+  return db.$queryRaw<ClaimedJob[]>(Prisma.sql`
+    WITH candidates AS (
+      SELECT "id"
+      FROM "ImportJob"
+      WHERE "status" = 'PENDING'::"ImportStatus"
+      ORDER BY "createdAt" ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT ${limit}
+    )
+    UPDATE "ImportJob" AS job
+    SET "status" = 'RUNNING'::"ImportStatus",
+        "startedAt" = COALESCE(job."startedAt", NOW())
+    FROM candidates
+    WHERE job."id" = candidates."id"
+    RETURNING job."id"
+  `);
+}
+
 export async function processImportJob(jobId: string, batchSize = 250) {
   const job = await db.importJob.findUnique({
     where: { id: jobId },
-    include: { payload: true, source: { include: { licenses: true } } }
+    include: { payload: true, object: true, source: { include: { licenses: true } } }
   });
-  if (!job || !job.payload) throw new Error('IMPORT_JOB_OR_PAYLOAD_NOT_FOUND');
+  if (!job || (!job.payload && !job.object)) throw new Error('IMPORT_JOB_OR_PAYLOAD_NOT_FOUND');
+  if (job.status !== 'RUNNING') throw new Error('IMPORT_JOB_NOT_CLAIMED');
 
   const license = findLicenseForAction(job.source.licenses, 'STORE');
   if (!license) {
     const result = await db.importJob.update({
       where: { id: job.id },
-      data: { status: 'FAILED', finishedAt: new Date(), rowsFailed: 1, errorLog: [{ message: 'SOURCE_STORAGE_NOT_LICENSED' }] }
+      data: { status: 'FAILED', finishedAt: new Date(), rowsFailed: 1, errorLog: [{ message: 'SOURCE_STORAGE_NOT_LICENSED', rows: 1 }] }
     });
-    await db.importPayload.deleteMany({ where: { importJobId: job.id } });
+    await disposeJobPayload(job);
     return result;
   }
 
-  await db.importJob.update({ where: { id: job.id }, data: { status: 'RUNNING', startedAt: new Date() } });
-
   try {
-    const inputs = parsePayload(job.payload.content, job.format as ImportFormat);
+    const raw = await loadJobPayload(job);
+    const inputs = parsePayload(raw, job.format as ImportFormat);
     const valid: ImportRecord[] = [];
-    const errors: Array<{ index: number; message: string }> = [];
+    const errors: ErrorEntry[] = [];
 
     inputs.forEach((input, index) => {
       try {
         valid.push(validateImportRecord(input));
       } catch (error) {
-        errors.push({ index, message: error instanceof Error ? error.message : 'VALIDATION_FAILED' });
+        errors.push({ index, message: error instanceof Error ? error.message : 'VALIDATION_FAILED', rows: 1 });
       }
     });
 
     let written = 0;
+    let failedBatchRows = 0;
     const rawExpiresAt = retentionExpiry(license, job.createdAt);
     for (const batch of chunkArray(valid, batchSize)) {
       try {
         written += await processRecordBatch(job.source.key, job.sourceId, batch, rawExpiresAt);
       } catch (error) {
-        errors.push({ index: -1, message: error instanceof Error ? error.message : 'BATCH_FAILED' });
+        failedBatchRows += batch.length;
+        errors.push({ index: -1, message: error instanceof Error ? error.message : 'BATCH_FAILED', rows: batch.length });
       }
     }
 
-    const failed = errors.length;
+    const validationFailures = inputs.length - valid.length;
+    const failed = validationFailures + failedBatchRows;
     const status = failed === 0 ? 'COMPLETED' : written === 0 ? 'FAILED' : 'PARTIAL';
     const result = await db.importJob.update({
       where: { id: job.id },
-      data: { status, rowsRead: inputs.length, rowsWritten: written, rowsFailed: failed, errorLog: errors, finishedAt: new Date() }
+      data: {
+        status,
+        rowsRead: inputs.length,
+        rowsValidated: valid.length,
+        rowsWritten: written,
+        rowsFailed: failed,
+        errorLog: errors,
+        finishedAt: new Date()
+      }
     });
-    await db.importPayload.deleteMany({ where: { importJobId: job.id } });
+    await disposeJobPayload(job);
     return result;
   } catch (error) {
     const result = await db.importJob.update({
       where: { id: job.id },
       data: {
         status: 'FAILED',
-        rowsFailed: 1,
-        errorLog: [{ message: error instanceof Error ? error.message : 'IMPORT_FAILED' }],
+        rowsFailed: Math.max(job.rowsFailed, 1),
+        errorLog: [{ message: error instanceof Error ? error.message : 'IMPORT_FAILED', rows: 1 }],
         finishedAt: new Date()
       }
     });
-    await db.importPayload.deleteMany({ where: { importJobId: job.id } });
+    await disposeJobPayload(job);
     return result;
   }
 }
 
 export async function processPendingImportJobs(limit = 1, batchSize = 250) {
-  const jobs = await db.importJob.findMany({
-    where: { status: 'PENDING' },
-    orderBy: { createdAt: 'asc' },
-    take: limit,
-    select: { id: true }
-  });
+  const jobs = await claimPendingImportJobs(limit);
   const results = [];
   for (const job of jobs) results.push(await processImportJob(job.id, batchSize));
   await cleanupExpiredRawData();
@@ -195,7 +279,19 @@ export async function processPendingImportJobs(limit = 1, batchSize = 250) {
 export async function cleanupExpiredRawData(now = new Date()) {
   await db.vehicleEvent.updateMany({
     where: { rawPayloadExpiresAt: { lte: now } },
-    data: { rawPayload: Prisma.DbNull }
+    data: { rawPayload: Prisma.DbNull, rawPayloadExpiresAt: null }
   });
+
   await db.importPayload.deleteMany({ where: { expiresAt: { lte: now } } });
+
+  const expiredObjects = await db.importObject.findMany({
+    where: { expiresAt: { lte: now }, deletedAt: null },
+    select: { id: true, provider: true, storageKey: true }
+  });
+  const storage = getImportStorage();
+  for (const object of expiredObjects) {
+    if (object.provider !== storage.provider) continue;
+    await storage.delete(object.storageKey).catch(() => undefined);
+    await db.importObject.update({ where: { id: object.id }, data: { deletedAt: now } });
+  }
 }
