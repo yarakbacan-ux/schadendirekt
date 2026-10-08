@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ProviderAttribute, ProviderEvent, ProviderLookupResult } from '@/lib/providers/types';
 import type { DvsaDefect, DvsaMotTest, DvsaVehicle } from '@/lib/dvsa-types';
 
@@ -40,12 +41,28 @@ function normalizedDefects(defects: DvsaDefect[] | null | undefined) {
   }));
 }
 
-function testExternalId(test: DvsaMotTest, index: number): string {
+function fallbackTestFingerprint(test: DvsaMotTest): string {
+  const defects = normalizedDefects(test.defects)
+    .map((defect) => `${defect.type}|${defect.dangerous ? '1' : '0'}|${defect.text}`)
+    .sort();
+  const stableFields = {
+    completedDate: clean(test.completedDate),
+    expiryDate: clean(test.expiryDate),
+    testResult: clean(test.testResult)?.toUpperCase() ?? null,
+    registrationAtTimeOfTest: clean(test.regMarkTimeOfTest ?? test.registrationAtTimeOfTest)?.toUpperCase() ?? null,
+    odometerValue: clean(test.odometerValue),
+    odometerUnit: clean(test.odometerUnit)?.toUpperCase() ?? null,
+    odometerResultType: clean(test.odometerResultType)?.toUpperCase() ?? null,
+    dataSource: clean(test.dataSource),
+    defects
+  };
+  return createHash('sha256').update(JSON.stringify(stableFields)).digest('hex').slice(0, 32);
+}
+
+function testExternalId(test: DvsaMotTest): string {
   const number = clean(test.motTestNumber);
   if (number) return `mot:${number}`;
-  const completed = clean(test.completedDate) ?? 'unknown-date';
-  const registration = clean(test.regMarkTimeOfTest ?? test.registrationAtTimeOfTest) ?? 'unknown-reg';
-  return `mot:fallback:${completed}:${registration}:${index}`;
+  return `mot:fallback:${fallbackTestFingerprint(test)}`;
 }
 
 function testTitle(test: DvsaMotTest) {
@@ -101,12 +118,12 @@ function vehicleAttributes(vehicle: DvsaVehicle, fetchedAt: Date): ProviderAttri
 
 export function mapDvsaVehicle(vehicle: DvsaVehicle, fetchedAt = new Date()): ProviderLookupResult {
   const attributes = vehicleAttributes(vehicle, fetchedAt);
-  const events: ProviderEvent[] = (vehicle.motTests ?? []).map((test, index) => {
+  const events: ProviderEvent[] = (vehicle.motTests ?? []).map((test) => {
     const odometer = normalizeDvsaOdometer(test.odometerValue, test.odometerUnit);
     const defects = normalizedDefects(test.defects);
     const testResult = clean(test.testResult)?.toUpperCase() ?? null;
     return {
-      externalId: testExternalId(test, index),
+      externalId: testExternalId(test),
       eventType: 'INSPECTION',
       sourceEventType: testResult ? `MOT_${testResult}` : 'MOT',
       eventDate: dateOrNull(test.completedDate),

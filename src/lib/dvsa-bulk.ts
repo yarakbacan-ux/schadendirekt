@@ -7,6 +7,8 @@ export type DvsaBulkRecord = {
   modification: 'CREATED' | 'UPDATED' | 'DELETED' | 'UNKNOWN';
 };
 
+type DvsaChunk = Uint8Array | string;
+
 function parseLine(line: string, lineNumber: number): DvsaBulkRecord | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
@@ -25,35 +27,46 @@ export function parseDvsaNdjson(text: string): DvsaBulkRecord[] {
   return records;
 }
 
-export async function* parseDvsaNdjsonStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<DvsaBulkRecord> {
-  const reader = stream.getReader();
+export async function* parseDvsaNdjsonChunks(chunks: AsyncIterable<DvsaChunk>): AsyncGenerator<DvsaBulkRecord> {
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let lineNumber = 0;
-  try {
+
+  for await (const chunk of chunks) {
+    buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
     while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      while (true) {
-        const newline = buffer.indexOf('\n');
-        if (newline < 0) break;
-        const line = buffer.slice(0, newline).replace(/\r$/, '');
-        buffer = buffer.slice(newline + 1);
-        lineNumber += 1;
-        const record = parseLine(line, lineNumber);
-        if (record) yield record;
-      }
-    }
-    buffer += decoder.decode();
-    if (buffer.trim()) {
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) break;
+      const line = buffer.slice(0, newline).replace(/\r$/, '');
+      buffer = buffer.slice(newline + 1);
       lineNumber += 1;
-      const record = parseLine(buffer.replace(/\r$/, ''), lineNumber);
+      const record = parseLine(line, lineNumber);
       if (record) yield record;
     }
-  } finally {
-    reader.releaseLock();
   }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    lineNumber += 1;
+    const record = parseLine(buffer.replace(/\r$/, ''), lineNumber);
+    if (record) yield record;
+  }
+}
+
+export async function* parseDvsaNdjsonStream(stream: ReadableStream<Uint8Array>): AsyncGenerator<DvsaBulkRecord> {
+  const reader = stream.getReader();
+  async function* chunks(): AsyncGenerator<Uint8Array> {
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        if (value) yield value;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  yield* parseDvsaNdjsonChunks(chunks());
 }
 
 export function mapDvsaBulkRecord(record: DvsaBulkRecord) {

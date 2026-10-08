@@ -62,4 +62,36 @@ describe('mapDvsaVehicle', () => {
       defects: [{ dangerous: true, text: 'TEST dangerous', type: 'DANGEROUS' }]
     });
   });
+
+  it('keeps fallback external IDs identical when MOT tests arrive in a different array order', () => {
+    const first = {
+      completedDate: '2025-05-01 09:00:00',
+      expiryDate: '2026-04-30',
+      testResult: 'PASSED',
+      registrationAtTimeOfTest: 'TEST111',
+      odometerValue: '51000',
+      odometerUnit: 'MI',
+      odometerResultType: 'READ',
+      defects: [{ text: 'TEST advisory', type: 'ADVISORY', dangerous: false }]
+    };
+    const second = {
+      completedDate: '2024-05-01 09:00:00',
+      expiryDate: '2025-04-30',
+      testResult: 'FAILED',
+      registrationAtTimeOfTest: 'TEST111',
+      odometerValue: '48000',
+      odometerUnit: 'MI',
+      odometerResultType: 'READ',
+      defects: [{ text: 'TEST dangerous', type: 'DANGEROUS', dangerous: true }]
+    };
+
+    const a = mapDvsaVehicle({ registration: 'TEST111', motTests: [first, second] });
+    const b = mapDvsaVehicle({ registration: 'TEST111', motTests: [second, first] });
+    const idsA = a.events.map((event) => event.externalId).sort();
+    const idsB = b.events.map((event) => event.externalId).sort();
+
+    expect(idsA).toEqual(idsB);
+    expect(idsA.every((id) => id.startsWith('mot:fallback:'))).toBe(true);
+    expect(idsA.every((id) => !id.includes('TEST111'))).toBe(true);
+  });
 });
