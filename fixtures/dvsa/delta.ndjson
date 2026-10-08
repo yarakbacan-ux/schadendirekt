@@ -1,0 +1,3 @@
+{"_fixture":"TESTDATA_ONLY","registration":"TEST001","make":"TEST","model":"ONE","modification":"CREATED","motTests":[]}
+{"_fixture":"TESTDATA_ONLY","registration":"TEST002","make":"TEST","model":"TWO","last_modification":"UPDATED","motTests":[{"completedDate":"2025-01-01 12:00:00","motTestNumber":900000000003,"testResult":"PASSED","odometerValue":"10000","odometerUnit":"KM","odometerResultType":"READ","defects":[]}]}
+{"_fixture":"TESTDATA_ONLY","registration":"TEST003","last_modification":"DELETED","motTests":[]}

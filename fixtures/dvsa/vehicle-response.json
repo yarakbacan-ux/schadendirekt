@@ -1,0 +1,47 @@
+{
+  "_fixture": "TESTDATA_ONLY_NOT_REAL_VEHICLE_HISTORY",
+  "registration": "TEST123",
+  "make": "TEST MAKE",
+  "model": "TEST MODEL",
+  "fuelType": "Petrol",
+  "engineSize": "1998",
+  "primaryColour": "Blue",
+  "firstUsedDate": "2020-01-10",
+  "dataSource": "dvsa",
+  "motTests": [
+    {
+      "completedDate": "2025-01-20 10:30:00",
+      "motTestNumber": 900000000001,
+      "dataSource": "dvsa",
+      "expiryDate": "2026-01-19",
+      "regMarkTimeOfTest": "TEST123",
+      "testResult": "PASSED",
+      "odometerValue": "50000",
+      "odometerUnit": "MI",
+      "odometerResultType": "READ",
+      "defects": [
+        {
+          "dangerous": false,
+          "text": "TEST advisory only",
+          "type": "ADVISORY"
+        }
+      ]
+    },
+    {
+      "completedDate": "2024-01-20 09:00:00",
+      "motTestNumber": 900000000002,
+      "dataSource": "dvsa",
+      "testResult": "FAILED",
+      "odometerValue": "47000",
+      "odometerUnit": "MI",
+      "odometerResultType": "READ",
+      "defects": [
+        {
+          "dangerous": true,
+          "text": "TEST dangerous defect",
+          "type": "DANGEROUS"
+        }
+      ]
+    }
+  ]
+}

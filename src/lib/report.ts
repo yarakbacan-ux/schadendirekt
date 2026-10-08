@@ -1,8 +1,10 @@
+import type { Prisma } from '@prisma/client';
 import { db } from '@/lib/db';
 import { findLicenseForAction, type LicenseLike } from '@/lib/license-policy';
 import { analyzeMileage } from '@/lib/mileage-analysis';
 import { runVehicleProviders } from '@/lib/providers/orchestrator';
 import { NHTSA_SOURCE_KEY } from '@/lib/nhtsa';
+import { DVSA_SOURCE_KEY } from '@/lib/providers/dvsa-provider';
 import { isValidVin, normalizeVin } from '@/lib/vin';
 import type { VehicleEventTypeName } from '@/lib/event-types';
 
@@ -34,6 +36,7 @@ type ReportInput = {
     title: string;
     description: string | null;
     quality: string;
+    rawPayload: Prisma.JsonValue | null;
     importedAt: Date;
     source: SourceInput;
   }>;
@@ -114,6 +117,7 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
       title: event.title,
       description: event.description,
       quality: event.quality,
+      details: event.rawPayload,
       source: { key: event.source.key, name: event.source.name }
     }));
 
@@ -151,6 +155,7 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
   })));
 
   const damageEvents = timeline.filter((event) => event.type === 'DAMAGE_RECORD');
+  const inspectionEvents = timeline.filter((event) => event.type === 'INSPECTION');
   const sourceMap = new Map<string, ReportSource>();
   for (const event of timeline) sourceMap.set(event.source.key, event.source);
   for (const attribute of attributes.values()) sourceMap.set(attribute.source.key, { key: attribute.source.key, name: attribute.source.name });
@@ -167,6 +172,7 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
     events: timeline,
     mileageAnalysis: mileage,
     damageEvents,
+    inspectionEvents,
     sources: [...sourceMap.values()],
     generatedAt: now.toISOString(),
     disclaimer: status === 'NO_DATA'
@@ -175,17 +181,20 @@ export function serializeVehicleReport(input: ReportInput, now = new Date()) {
   } as const;
 }
 
-export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?: boolean } = {}) {
+export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?: boolean; hydrateDvsa?: boolean } = {}) {
   const vin = normalizeVin(rawVin);
   if (!isValidVin(vin)) throw new Error('INVALID_VIN');
 
-  if (options.hydrateNhtsa !== false) {
-    await runVehicleProviders(vin, {
-      origin: 'PUBLIC_LOOKUP',
-      providerKeys: [NHTSA_SOURCE_KEY],
-      capabilities: ['VIN_DECODE']
-    });
-  }
+  const providerKeys: string[] = [];
+  if (options.hydrateNhtsa !== false) providerKeys.push(NHTSA_SOURCE_KEY);
+  if (options.hydrateDvsa !== false) providerKeys.push(DVSA_SOURCE_KEY);
+
+  const outcomes = providerKeys.length > 0
+    ? await runVehicleProviders(vin, { origin: 'PUBLIC_LOOKUP', providerKeys })
+    : [];
+  const providerIssues = outcomes
+    .filter((outcome) => outcome.status !== 'SUCCESS')
+    .map((outcome) => ({ providerKey: outcome.providerKey, status: outcome.status, errorCode: outcome.errorCode }));
 
   const vehicle = await db.vehicle.findUnique({
     where: { vin },
@@ -209,13 +218,15 @@ export async function getVehicleReport(rawVin: string, options: { hydrateNhtsa?:
       vehicle: { vin, provenance: {} },
       timeline: [],
       events: [],
+      inspectionEvents: [],
       mileageAnalysis: { status: 'INSUFFICIENT_DATA' as const, readings: [], findings: [] },
       damageEvents: [],
       sources: [],
+      providerIssues,
       generatedAt: new Date().toISOString(),
       disclaimer: 'Für diese FIN liegen derzeit keine veröffentlichbaren Daten vor. Das bedeutet nicht, dass das Fahrzeug unfallfrei ist oder der Kilometerstand korrekt ist.'
     };
   }
 
-  return serializeVehicleReport(vehicle);
+  return { ...serializeVehicleReport(vehicle), providerIssues };
 }
