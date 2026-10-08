@@ -1,7 +1,7 @@
 import { Prisma, type VehicleOrigin } from '@prisma/client';
 import { db } from '@/lib/db';
 import { findLicenseForAction, retentionExpiry, type LicenseLike } from '@/lib/license-policy';
-import { analyzeAttributeConflict, groupAttributeConflicts } from '@/lib/providers/conflicts';
+import { groupAttributeConflicts } from '@/lib/providers/conflicts';
 import { evaluateProviderEligibility } from '@/lib/providers/eligibility';
 import { selectProviders } from '@/lib/providers/registry';
 import type {
@@ -68,12 +68,7 @@ async function ensureProviderSource(provider: VehicleDataProvider) {
     where: { id: source.id },
     include: {
       licenses: true,
-      coverages: true,
-      providerRuns: {
-        where: { status: { in: ['SUCCESS', 'NO_DATA'] } },
-        orderBy: { finishedAt: 'desc' },
-        take: 1
-      }
+      coverages: true
     }
   });
 }
@@ -239,10 +234,31 @@ async function recordDecision(
   });
 }
 
-async function markCoverageSuccessful(sourceId: string, provider: VehicleDataProvider, finishedAt: Date) {
-  const capabilities = new Set(provider.capabilities);
+async function latestSuccessfulRunForVin(sourceId: string, vin: string) {
+  return db.providerRun.findFirst({
+    where: {
+      sourceId,
+      vin,
+      status: { in: ['SUCCESS', 'NO_DATA'] }
+    },
+    orderBy: { finishedAt: 'desc' },
+    select: { finishedAt: true }
+  });
+}
+
+async function markCoverageSuccessful(
+  sourceId: string,
+  provider: VehicleDataProvider,
+  finishedAt: Date,
+  coverageMarket: string | null
+) {
+  if (!coverageMarket) return;
   await db.providerCoverage.updateMany({
-    where: { sourceId, capability: { in: [...capabilities] } },
+    where: {
+      sourceId,
+      market: coverageMarket.toUpperCase(),
+      capability: { in: [...provider.capabilities] }
+    },
     data: { lastSuccessfulAt: finishedAt }
   });
 }
@@ -281,13 +297,14 @@ export async function runVehicleProviders(
     const requiredLicense = publicUse
       ? findLicenseForAction(source.licenses, 'COMMERCIALIZE', startedAt)
       : findLicenseForAction(source.licenses, 'STORE', startedAt);
+    const lastSuccessfulRun = await latestSuccessfulRunForVin(source.id, vin);
     const eligibility = evaluateProviderEligibility({
       provider,
       sourceActive: source.active,
       configured: configuration.configured,
       hasRequiredLicense: Boolean(requiredLicense),
       market,
-      lastSuccessfulAt: source.providerRuns[0]?.finishedAt ?? null,
+      lastSuccessfulAt: lastSuccessfulRun?.finishedAt ?? null,
       now: startedAt
     });
 
@@ -333,7 +350,7 @@ export async function runVehicleProviders(
           finishedAt
         }
       });
-      await markCoverageSuccessful(source.id, provider, finishedAt);
+      await markCoverageSuccessful(source.id, provider, finishedAt, eligibility.coverage?.market ?? null);
       outcomes.push({
         providerKey: provider.key,
         status: runStatus,
