@@ -12,7 +12,8 @@
     "db:migrate": "prisma migrate deploy",
     "db:generate": "prisma generate",
     "user:create-admin": "node scripts/create-admin.mjs",
-    "license:approve-nhtsa": "node scripts/approve-nhtsa-license.mjs"
+    "license:approve-nhtsa": "node scripts/approve-nhtsa-license.mjs",
+    "license:configure-dvsa": "node scripts/configure-dvsa-license.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.16.2",
