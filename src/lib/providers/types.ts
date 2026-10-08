@@ -11,6 +11,22 @@ export const PROVIDER_CAPABILITIES = [
 ] as const;
 
 export type ProviderCapability = (typeof PROVIDER_CAPABILITIES)[number];
+export type ProviderAuthType = 'NONE' | 'API_KEY' | 'OAUTH2_CLIENT_CREDENTIALS' | 'BASIC' | 'PARTNER' | 'OTHER';
+export type ProviderCoverageStatus = 'LIVE' | 'PARTIAL' | 'PLANNED' | 'UNAVAILABLE';
+
+export type ProviderCoverageDefinition = {
+  marketCode: string;
+  capabilities: readonly ProviderCapability[];
+  status: ProviderCoverageStatus;
+  earliestDate?: string | null;
+  latestDate?: string | null;
+  requiresCredentials?: boolean;
+  requiresContract?: boolean;
+  requiresLicense?: boolean;
+  freshnessHours?: number | null;
+  qualityNote?: string | null;
+  notes?: string | null;
+};
 
 export type ProviderAttribute = {
   field: string;
@@ -56,13 +72,24 @@ export type VehicleDataProvider = {
   name: string;
   description: string;
   capabilities: readonly ProviderCapability[];
+  authType: ProviderAuthType;
+  refreshPolicy: string;
+  rateLimitPolicy: string;
+  mappingVersion: string;
+  coverage: readonly ProviderCoverageDefinition[];
+  mapping: Readonly<Record<string, string>>;
   configurationStatus?: () => ProviderConfigurationStatus;
   lookup(vin: string, context: ProviderLookupContext): Promise<ProviderLookupResult>;
 };
 
+export type ProviderDecision = 'DATA' | 'NO_DATA' | 'NOT_APPLICABLE' | 'NOT_CONFIGURED' | 'ERROR' | 'SKIPPED';
+
 export type ProviderOutcome = {
   providerKey: string;
   status: 'SUCCESS' | 'FAILED' | 'SKIPPED';
+  decision: ProviderDecision;
+  decisionReason: string | null;
+  mappingVersion: string;
   cached: boolean;
   attributes: ProviderAttribute[];
   events: ProviderEvent[];
