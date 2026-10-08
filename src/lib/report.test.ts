@@ -3,12 +3,15 @@ import { describe, expect, it } from 'vitest';
 import { serializeVehicleReport } from '@/lib/report';
 
 const allowedLicense = {
+  licenseName: 'Reviewed report fixture license',
   canStore: true,
   canRedistribute: true,
   canCommercialize: true,
   validFrom: null,
   validUntil: null,
-  retentionDays: null
+  retentionDays: null,
+  reviewedAt: new Date('2026-01-01T00:00:00Z'),
+  reviewedBy: 'CI'
 };
 
 const blockedLicense = {
