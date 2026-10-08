@@ -119,8 +119,9 @@ describeDb('dynamic report provider flow', () => {
     await licensedSource(REGIONAL_KEY);
 
     const report = await getVehicleReport(VIN_GB, { providerKeys: [GLOBAL_KEY, REGIONAL_KEY] });
+    const reportVehicle = report.vehicle as Record<string, unknown>;
     expect(regionalCalls).toBe(1);
-    expect(report.vehicle.market).toBe('GB');
+    expect(reportVehicle.market).toBe('GB');
     expect(report.coverage).toEqual(expect.arrayContaining([
       expect.objectContaining({ providerKey: GLOBAL_KEY, state: 'DATA' }),
       expect.objectContaining({ providerKey: REGIONAL_KEY, state: 'NO_DATA', market: 'GB' })
