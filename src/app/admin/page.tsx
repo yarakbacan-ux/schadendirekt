@@ -8,6 +8,7 @@ import { analyzeMileage } from '@/lib/mileage-analysis';
 import { VEHICLE_EVENT_TYPES } from '@/lib/event-types';
 import { listProviders } from '@/lib/providers/registry';
 import { findLicenseForAction } from '@/lib/license-policy';
+import { DVSA_SOURCE_KEY } from '@/lib/providers/dvsa-provider';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,7 +37,7 @@ export default async function AdminPage({
   if (VEHICLE_EVENT_TYPES.includes(eventType as (typeof VEHICLE_EVENT_TYPES)[number])) eventWhere.eventType = eventType as VehicleEventType;
   if (Object.values(DataQuality).includes(quality as DataQuality)) eventWhere.quality = quality as DataQuality;
 
-  const [vehicleCount, eventCount, sources, imports, events, vehicles] = await Promise.all([
+  const [vehicleCount, eventCount, sources, imports, events, vehicles, dvsaImports] = await Promise.all([
     db.vehicle.count(),
     db.vehicleEvent.count(),
     db.dataSource.findMany({
@@ -61,16 +62,20 @@ export default async function AdminPage({
         attributes: { include: { source: true }, orderBy: { fetchedAt: 'desc' } },
         events: { select: { id: true, eventDate: true, mileageKm: true } }
       }
+    }),
+    db.importJob.findMany({
+      where: { source: { key: DVSA_SOURCE_KEY } },
+      orderBy: { createdAt: 'desc' },
+      take: 20
     })
   ]);
 
-  const vehicleRows = vehicles.map((vehicle) => ({
-    vehicle,
-    mileage: analyzeMileage(vehicle.events)
-  }));
+  const vehicleRows = vehicles.map((vehicle) => ({ vehicle, mileage: analyzeMileage(vehicle.events) }));
   const registeredProviders = listProviders();
   const providerByKey = new Map(registeredProviders.map((provider) => [provider.key, provider]));
   const now = new Date();
+  const lastDvsaBulk = dvsaImports.find((job) => /bulk/i.test(job.fileName ?? ''));
+  const lastDvsaDelta = dvsaImports.find((job) => /delta/i.test(job.fileName ?? ''));
 
   return (
     <main className="shell adminShell">
@@ -115,15 +120,20 @@ export default async function AdminPage({
             const lastRun = source?.providerRuns[0];
             const storeAllowed = Boolean(source && findLicenseForAction(source.licenses, 'STORE', now));
             const commercialAllowed = Boolean(source && findLicenseForAction(source.licenses, 'COMMERCIALIZE', now));
+            const configuration = provider.configurationStatus?.() ?? { configured: true, missing: [] };
             return (
               <article key={provider.key}>
                 <strong>{provider.name}</strong>
                 <span>{provider.key} · {source?.active === false ? 'INAKTIV' : 'REGISTRIERT'}</span>
                 <p>Capabilities: {provider.capabilities.join(', ')}</p>
+                <p>Credentials: {configuration.configured ? 'CONFIGURED ✓' : `MISSING (${configuration.missing.join(', ')})`}</p>
                 <p>Lizenz: Store {storeAllowed ? '✓' : '✗'} · Commercial {commercialAllowed ? '✓' : '✗'}</p>
                 <p>{lastRun
                   ? `Letzter Lauf: ${lastRun.status} · ${lastRun.cached ? 'Cache' : 'Live'} · ${lastRun.durationMs} ms · ${lastRun.finishedAt.toLocaleString('de-DE')}${lastRun.errorCode ? ` · ${lastRun.errorCode}` : ''}`
                   : 'Noch kein Provider-Lauf protokolliert.'}</p>
+                {provider.key === DVSA_SOURCE_KEY && (
+                  <p>Bulk: {lastDvsaBulk ? `${lastDvsaBulk.status} · ${lastDvsaBulk.fileName ?? 'Datei'} · ${lastDvsaBulk.createdAt.toLocaleString('de-DE')}` : 'noch nicht verarbeitet'} · Delta: {lastDvsaDelta ? `${lastDvsaDelta.status} · ${lastDvsaDelta.fileName ?? 'Datei'} · ${lastDvsaDelta.createdAt.toLocaleString('de-DE')}` : 'noch nicht verarbeitet'}</p>
+                )}
               </article>
             );
           })}
