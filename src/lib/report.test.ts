@@ -43,12 +43,12 @@ function baseVehicle() {
     events: [
       {
         id: 'allowed-event', eventType: 'ODOMETER_READING', sourceEventType: 'Mileage', eventDate: new Date('2025-01-01'),
-        country: 'DE', mileageKm: 50_000, title: 'Kilometerstand', description: null, quality: 'VERIFIED', importedAt: new Date('2026-01-01'),
+        country: 'DE', mileageKm: 50_000, title: 'Kilometerstand', description: null, quality: 'VERIFIED', rawPayload: null, importedAt: new Date('2026-01-01'),
         source: { key: 'licensed-source', name: 'Licensed source', licenses: [allowedLicense] }
       },
       {
         id: 'blocked-event', eventType: 'DAMAGE_RECORD', sourceEventType: 'Damage', eventDate: new Date('2025-02-01'),
-        country: 'DE', mileageKm: 51_000, title: 'Nicht veröffentlichbar', description: null, quality: 'VERIFIED', importedAt: new Date('2026-01-01'),
+        country: 'DE', mileageKm: 51_000, title: 'Nicht veröffentlichbar', description: null, quality: 'VERIFIED', rawPayload: null, importedAt: new Date('2026-01-01'),
         source: { key: 'blocked-source', name: 'Blocked source', licenses: [blockedLicense] }
       }
     ]
@@ -119,5 +119,40 @@ describe('serializeVehicleReport', () => {
     });
     const report = serializeVehicleReport(input, new Date('2026-03-02T00:00:00Z'));
     expect(report.vehicle.make).toBe('BMW');
+  });
+
+  it('includes licensed DVSA MOT readings in inspection history and mileage analysis', () => {
+    const input = baseVehicle();
+    input.events.push({
+      id: 'dvsa-mot-1',
+      eventType: 'INSPECTION',
+      sourceEventType: 'MOT_PASSED',
+      eventDate: new Date('2025-06-01'),
+      country: 'GB',
+      mileageKm: 60_000,
+      title: 'MOT-Prüfung bestanden',
+      description: 'MOT-Ergebnis: PASSED.',
+      quality: 'VERIFIED',
+      rawPayload: { motTestNumber: '900000000001', testResult: 'PASSED', defects: [] },
+      importedAt: new Date('2026-01-02'),
+      source: { key: 'dvsa-mot', name: 'DVSA MOT History', licenses: [allowedLicense] }
+    });
+
+    const report = serializeVehicleReport(input, new Date('2026-02-01T00:00:00Z'));
+    expect(report.inspectionEvents.map((event) => event.id)).toContain('dvsa-mot-1');
+    expect(report.mileageAnalysis.readings.map((reading) => reading.mileageKm)).toEqual([50_000, 60_000]);
+    expect(report.inspectionEvents[0]?.details).toMatchObject({ motTestNumber: '900000000001' });
+  });
+
+  it('does not publish DVSA inspection data when commercialization rights are missing', () => {
+    const input = baseVehicle();
+    input.events.push({
+      id: 'dvsa-blocked', eventType: 'INSPECTION', sourceEventType: 'MOT_PASSED', eventDate: new Date('2025-06-01'),
+      country: 'GB', mileageKm: 60_000, title: 'MOT', description: null, quality: 'VERIFIED', rawPayload: { testResult: 'PASSED' }, importedAt: new Date('2026-01-01'),
+      source: { key: 'dvsa-mot', name: 'DVSA MOT History', licenses: [blockedLicense] }
+    });
+    const report = serializeVehicleReport(input, new Date('2026-02-01T00:00:00Z'));
+    expect(report.inspectionEvents).toHaveLength(0);
+    expect(report.timeline.map((event) => event.id)).not.toContain('dvsa-blocked');
   });
 });
