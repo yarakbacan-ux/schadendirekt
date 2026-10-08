@@ -28,52 +28,107 @@ enum DataQuality {
   REJECTED
 }
 
+enum VehicleEventType {
+  ODOMETER_READING
+  DAMAGE_RECORD
+  INSPECTION
+  REGISTRATION
+  SALE_LISTING
+  SERVICE
+  RECALL
+  IMPORT_EXPORT
+  OTHER
+}
+
 model Vehicle {
-  id        String         @id @default(cuid())
-  vin       String         @unique @db.VarChar(17)
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-  events    VehicleEvent[]
+  id                 String             @id @default(cuid())
+  vin                String             @unique @db.VarChar(17)
+  make               String?
+  model              String?
+  modelYear          Int?
+  bodyClass          String?
+  fuelType           String?
+  engineDisplacement Float?
+  enginePowerKw      Float?
+  transmission       String?
+  manufacturer       String?
+  plantCountry       String?
+  vehicleType        String?
+  market             String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  events             VehicleEvent[]
+  attributes         VehicleAttribute[]
 
   @@index([vin])
 }
 
 model VehicleEvent {
-  id                  String       @id @default(cuid())
+  id                  String           @id @default(cuid())
   vehicleId           String
   sourceId            String
   externalId          String?
-  eventType           String
+  eventType           VehicleEventType @default(OTHER)
+  sourceEventType     String?
   eventDate           DateTime?
-  country             String?      @db.VarChar(2)
+  country             String?          @db.VarChar(2)
   mileageKm           Int?
   title               String
   description         String?
   rawPayload          Json?
   rawPayloadExpiresAt DateTime?
-  quality             DataQuality  @default(UNVERIFIED)
+  quality             DataQuality      @default(UNVERIFIED)
   occurredAtText      String?
-  importedAt          DateTime     @default(now())
-  vehicle             Vehicle      @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
-  source              DataSource   @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+  importedAt          DateTime         @default(now())
+  vehicle             Vehicle          @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  source              DataSource       @relation(fields: [sourceId], references: [id], onDelete: Restrict)
 
   @@unique([sourceId, externalId])
   @@index([vehicleId, eventDate])
+  @@index([eventType])
   @@index([sourceId])
   @@index([rawPayloadExpiresAt])
 }
 
+model VehicleAttribute {
+  id          String      @id @default(cuid())
+  vehicleId   String
+  sourceId    String
+  field       String
+  value       String      @db.Text
+  sourceField String?
+  rawValue    String?     @db.Text
+  quality     DataQuality @default(UNVERIFIED)
+  fetchedAt   DateTime    @default(now())
+  vehicle     Vehicle     @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  source      DataSource  @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+
+  @@unique([vehicleId, sourceId, field])
+  @@index([vehicleId, field])
+  @@index([sourceId])
+}
+
+model VinDecodeCache {
+  vin       String   @id @db.VarChar(17)
+  payload   Json
+  fetchedAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
 model DataSource {
-  id          String          @id @default(cuid())
-  key         String          @unique
-  name        String
-  description String?
-  active      Boolean         @default(true)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  events      VehicleEvent[]
-  importJobs  ImportJob[]
-  licenses    SourceLicense[]
+  id                String             @id @default(cuid())
+  key               String             @unique
+  name              String
+  description       String?
+  active            Boolean            @default(true)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  events            VehicleEvent[]
+  vehicleAttributes VehicleAttribute[]
+  importJobs        ImportJob[]
+  licenses          SourceLicense[]
 }
 
 model ImportJob {
@@ -114,10 +169,10 @@ model SourceLicense {
   sourceId            String
   licenseName         String
   termsUrl            String?
-  canStore             Boolean    @default(false)
-  canRedistribute      Boolean    @default(false)
-  canCommercialize     Boolean    @default(false)
-  retentionDays        Int?
+  canStore            Boolean    @default(false)
+  canRedistribute     Boolean    @default(false)
+  canCommercialize    Boolean    @default(false)
+  retentionDays       Int?
   notes                String?
   validFrom            DateTime?
   validUntil           DateTime?

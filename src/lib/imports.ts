@@ -5,6 +5,7 @@ import { parseCsv } from '@/lib/csv';
 import { eventFingerprint } from '@/lib/fingerprint';
 import { findLicenseForAction, retentionExpiry } from '@/lib/license-policy';
 import { validateImportRecord, type ImportRecord } from '@/lib/import-validation';
+import { normalizeEventType } from '@/lib/event-types';
 
 export type ImportFormat = 'JSON' | 'CSV';
 
@@ -76,11 +77,13 @@ async function processRecordBatch(
       const vehicleId = byVin.get(record.vin);
       if (!vehicleId) throw new Error('VEHICLE_UPSERT_FAILED');
       const externalId = record.externalId ?? eventFingerprint(sourceKey, record);
+      const eventType = normalizeEventType(record.eventType);
       return db.vehicleEvent.upsert({
         where: { sourceId_externalId: { sourceId, externalId } },
         update: {
           vehicleId,
-          eventType: record.eventType,
+          eventType,
+          sourceEventType: record.eventType,
           eventDate: record.eventDate ? new Date(record.eventDate) : null,
           country: record.country,
           mileageKm: record.mileageKm,
@@ -94,7 +97,8 @@ async function processRecordBatch(
           vehicleId,
           sourceId,
           externalId,
-          eventType: record.eventType,
+          eventType,
+          sourceEventType: record.eventType,
           eventDate: record.eventDate ? new Date(record.eventDate) : null,
           country: record.country,
           mileageKm: record.mileageKm,
