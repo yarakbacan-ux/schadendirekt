@@ -6,6 +6,7 @@ import type { VehicleDataProvider } from '@/lib/providers/types';
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const VIN = 'WBA12345678901234';
 const SOURCE_KEY = 'ci-provider';
+const CONTRACT_SOURCE_KEY = 'ci-contract-provider';
 
 const provider: VehicleDataProvider = {
   key: SOURCE_KEY,
@@ -30,15 +31,35 @@ const provider: VehicleDataProvider = {
   }
 };
 
-async function cleanup() {
-  const source = await db.dataSource.findUnique({ where: { key: SOURCE_KEY } });
-  if (source) {
-    await db.vehicleEvent.deleteMany({ where: { sourceId: source.id } });
-    await db.vehicleAttribute.deleteMany({ where: { sourceId: source.id } });
-    await db.sourceLicense.deleteMany({ where: { sourceId: source.id } });
-    await db.providerRun.deleteMany({ where: { sourceId: source.id } });
-    await db.dataSource.delete({ where: { id: source.id } });
+const contractProvider: VehicleDataProvider = {
+  key: CONTRACT_SOURCE_KEY,
+  name: 'CI Contract Provider',
+  description: 'Provider requiring independent license and contract gates',
+  capabilities: ['REGISTRATION'],
+  authType: 'CONTRACT',
+  mappingVersion: 'contract-map-v1',
+  coverage: [{
+    market: 'DE', capabilities: ['REGISTRATION'], status: 'LIVE', requirements: ['LICENSE', 'CONTRACT']
+  }],
+  async lookup() {
+    return { cached: false, availability: 'NO_DATA', attributes: [], events: [] };
   }
+};
+
+async function cleanupSource(key: string) {
+  const source = await db.dataSource.findUnique({ where: { key } });
+  if (!source) return;
+  await db.vehicleEvent.deleteMany({ where: { sourceId: source.id } });
+  await db.vehicleAttribute.deleteMany({ where: { sourceId: source.id } });
+  await db.sourceLicense.deleteMany({ where: { sourceId: source.id } });
+  await db.sourceContract.deleteMany({ where: { sourceId: source.id } });
+  await db.providerRun.deleteMany({ where: { sourceId: source.id } });
+  await db.dataSource.delete({ where: { id: source.id } });
+}
+
+async function cleanup() {
+  await cleanupSource(SOURCE_KEY);
+  await cleanupSource(CONTRACT_SOURCE_KEY);
   await db.vehicle.deleteMany({ where: { vin: VIN } });
 }
 
@@ -89,6 +110,55 @@ describeDb('provider orchestrator persistence policy', () => {
     const coverage = await db.providerCoverage.findMany({ where: { sourceId: source.id } });
     expect(coverage).toHaveLength(2);
     expect(coverage.every((item) => item.mappingVersion === 'ci-map-v1')).toBe(true);
+  });
+
+  it('treats persisted DB coverage as operative source-of-truth and never re-enables an unavailable source', async () => {
+    await cleanup();
+    await runVehicleProviders(VIN, { providers: [provider] });
+    const source = await db.dataSource.findUniqueOrThrow({ where: { key: SOURCE_KEY } });
+    await db.providerCoverage.updateMany({ where: { sourceId: source.id }, data: { status: 'UNAVAILABLE' } });
+
+    const outcome = await runVehicleProviders(VIN, { providers: [provider] });
+    expect(outcome[0]).toMatchObject({ status: 'NOT_APPLICABLE', decisionReason: 'COVERAGE_UNAVAILABLE' });
+    const coverage = await db.providerCoverage.findMany({ where: { sourceId: source.id } });
+    expect(coverage).not.toHaveLength(0);
+    expect(coverage.every((item) => item.status === 'UNAVAILABLE')).toBe(true);
+  });
+
+  it('requires an independently active contract and license when both are configured', async () => {
+    await cleanup();
+    await runVehicleProviders(VIN, { providers: [contractProvider], market: 'DE' });
+    const source = await db.dataSource.findUniqueOrThrow({ where: { key: CONTRACT_SOURCE_KEY } });
+    await db.sourceLicense.create({
+      data: {
+        sourceId: source.id,
+        licenseName: 'CI commercial license',
+        canStore: true,
+        canRedistribute: true,
+        canCommercialize: true,
+        reviewedAt: new Date(),
+        reviewedBy: 'CI'
+      }
+    });
+
+    const missingContract = await runVehicleProviders(VIN, { providers: [contractProvider], market: 'DE' });
+    expect(missingContract[0]).toMatchObject({ status: 'SKIPPED', decisionReason: 'CONTRACT_REQUIRED' });
+
+    await db.sourceContract.create({
+      data: {
+        sourceId: source.id,
+        name: 'CI partner agreement',
+        active: true,
+        reviewedAt: new Date(),
+        reviewedBy: 'CI'
+      }
+    });
+    const bothPresent = await runVehicleProviders(VIN, { providers: [contractProvider], market: 'DE' });
+    expect(bothPresent[0]?.status).toBe('NO_DATA');
+
+    await db.sourceLicense.deleteMany({ where: { sourceId: source.id } });
+    const missingLicense = await runVehicleProviders(VIN, { providers: [contractProvider], market: 'DE' });
+    expect(missingLicense[0]).toMatchObject({ status: 'SKIPPED', decisionReason: 'LICENSE_REQUIRED' });
   });
 
   it('records provider failure without inventing history', async () => {
