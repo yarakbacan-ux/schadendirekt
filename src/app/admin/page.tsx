@@ -136,7 +136,7 @@ export default async function AdminPage({
         <article className="resultCard reportPanel">
           <h2>Letzte Importjobs</h2>
           {imports.length === 0 ? <p>Noch keine Importe.</p> : <div className="timeline">{imports.map((job) => (
-            <article key={job.id}><strong>{job.source.name}</strong><span>{job.status} · {job.format}</span><p>{job.rowsWritten} erfolgreich · {job.rowsFailed} fehlerhaft · {job.rowsRead} gelesen</p></article>
+            <article key={job.id}><strong>{job.source.name}</strong><span>{job.status} · {job.format}</span><p>{job.rowsRead} gelesen · {job.rowsValidated} validiert · {job.rowsWritten} geschrieben · {job.rowsFailed} fehlgeschlagen</p></article>
           ))}</div>}
         </article>
         <article className="resultCard reportPanel">

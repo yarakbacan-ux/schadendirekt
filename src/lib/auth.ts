@@ -51,6 +51,21 @@ export async function destroySession(cookieHeader: string | null): Promise<void>
   await db.session.deleteMany({ where: { tokenHash: sha256(token) } });
 }
 
+export async function revokeUserSessions(userId: string, exceptSessionId?: string): Promise<number> {
+  const result = await db.session.deleteMany({
+    where: {
+      userId,
+      ...(exceptSessionId ? { id: { not: exceptSessionId } } : {})
+    }
+  });
+  return result.count;
+}
+
+export async function revokeSessionById(userId: string, sessionId: string): Promise<boolean> {
+  const result = await db.session.deleteMany({ where: { id: sessionId, userId } });
+  return result.count === 1;
+}
+
 export async function cleanupExpiredSessions(): Promise<void> {
   await db.session.deleteMany({ where: { expiresAt: { lte: new Date() } } });
 }

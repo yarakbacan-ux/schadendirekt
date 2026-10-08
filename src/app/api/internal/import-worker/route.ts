@@ -13,7 +13,17 @@ export async function POST(request: Request) {
 
     const results = await processPendingImportJobs(2, 250);
     return NextResponse.json(
-      { processed: results.map((job) => ({ id: job.id, status: job.status, rowsWritten: job.rowsWritten, rowsFailed: job.rowsFailed })), requestId: id },
+      {
+        processed: results.map((job) => ({
+          id: job.id,
+          status: job.status,
+          rowsRead: job.rowsRead,
+          rowsValidated: job.rowsValidated,
+          rowsWritten: job.rowsWritten,
+          rowsFailed: job.rowsFailed
+        })),
+        requestId: id
+      },
       { headers: { 'x-request-id': id } }
     );
   } catch (error) {

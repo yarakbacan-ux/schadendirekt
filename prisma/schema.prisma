@@ -132,27 +132,30 @@ model DataSource {
 }
 
 model ImportJob {
-  id          String        @id @default(cuid())
-  sourceId    String
-  status      ImportStatus  @default(PENDING)
-  format      String
-  fileName    String?
-  checksum    String?
-  rowsRead    Int           @default(0)
-  rowsWritten Int           @default(0)
-  rowsFailed  Int           @default(0)
-  errorLog    Json?
-  startedAt   DateTime?
-  finishedAt  DateTime?
-  createdAt   DateTime      @default(now())
-  source      DataSource    @relation(fields: [sourceId], references: [id], onDelete: Restrict)
-  payload     ImportPayload?
+  id            String        @id @default(cuid())
+  sourceId      String
+  status        ImportStatus  @default(PENDING)
+  format        String
+  fileName      String?
+  checksum      String?
+  rowsRead      Int           @default(0)
+  rowsValidated Int           @default(0)
+  rowsWritten   Int           @default(0)
+  rowsFailed    Int           @default(0)
+  errorLog      Json?
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime      @default(now())
+  source        DataSource    @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+  payload       ImportPayload?
+  object        ImportObject?
 
   @@index([sourceId, createdAt])
   @@index([status])
   @@index([checksum])
 }
 
+// Legacy compatibility for pre-hardening jobs. New uploads use ImportObject + external storage.
 model ImportPayload {
   id          String    @id @default(cuid())
   importJobId String    @unique
@@ -164,15 +167,31 @@ model ImportPayload {
   @@index([expiresAt])
 }
 
+model ImportObject {
+  id          String    @id @default(cuid())
+  importJobId String    @unique
+  provider    String
+  storageKey  String    @unique
+  sizeBytes   Int
+  checksum    String
+  expiresAt   DateTime?
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  importJob   ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([deletedAt])
+}
+
 model SourceLicense {
   id                  String     @id @default(cuid())
   sourceId            String
   licenseName         String
   termsUrl            String?
-  canStore            Boolean    @default(false)
-  canRedistribute     Boolean    @default(false)
-  canCommercialize    Boolean    @default(false)
-  retentionDays       Int?
+  canStore             Boolean    @default(false)
+  canRedistribute      Boolean    @default(false)
+  canCommercialize     Boolean    @default(false)
+  retentionDays        Int?
   notes                String?
   validFrom            DateTime?
   validUntil           DateTime?
@@ -186,14 +205,15 @@ model SourceLicense {
 }
 
 model User {
-  id           String    @id @default(cuid())
-  email        String    @unique
+  id           String         @id @default(cuid())
+  email        String         @unique
   passwordHash String
-  role         UserRole  @default(VIEWER)
-  active       Boolean   @default(true)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  role         UserRole       @default(VIEWER)
+  active       Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
   sessions     Session[]
+  authLogs     AuthAuditLog[]
 }
 
 model Session {
@@ -208,4 +228,20 @@ model Session {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+model AuthAuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  email     String
+  success   Boolean
+  reason    String?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([email, createdAt])
+  @@index([success, createdAt])
 }

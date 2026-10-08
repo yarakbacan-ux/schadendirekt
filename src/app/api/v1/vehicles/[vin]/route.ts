@@ -3,11 +3,12 @@ import { isValidVin, normalizeVin } from '@/lib/vin';
 import { requestId, unexpectedApiError } from '@/lib/api-errors';
 import { rateLimit } from '@/lib/rate-limit';
 import { getVehicleReport } from '@/lib/report';
+import { getClientIp } from '@/lib/client-ip';
 
 export async function GET(request: Request, context: { params: Promise<{ vin: string }> }) {
   const id = requestId(request);
-  const clientKey = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
-  const limited = rateLimit(`vin:${clientKey}`, 120, 60_000);
+  const clientKey = getClientIp(request.headers);
+  const limited = await rateLimit(`vin:${clientKey}`, 120, 60_000);
   if (!limited.allowed) {
     return NextResponse.json(
       { error: 'RATE_LIMITED', requestId: id },
