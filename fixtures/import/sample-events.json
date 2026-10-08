@@ -1,0 +1,23 @@
+{
+  "records": [
+    {
+      "vin": "WBA12345678901234",
+      "externalId": "fixture-event-001",
+      "eventType": "ODOMETER_READING",
+      "eventDate": "2025-05-10T00:00:00.000Z",
+      "country": "DE",
+      "mileageKm": 84500,
+      "title": "TESTDATEN: Kilometerstand",
+      "description": "Künstlicher Datensatz ausschließlich zum lokalen Test der Schadendirekt-Importpipeline. Keine reale Fahrzeughistorie."
+    },
+    {
+      "vin": "WBA12345678901234",
+      "externalId": "fixture-event-002",
+      "eventType": "DAMAGE_RECORD",
+      "eventDate": "2025-08-02T00:00:00.000Z",
+      "country": "DE",
+      "title": "TESTDATEN: Schadenereignis",
+      "description": "Künstlicher Datensatz ausschließlich zum lokalen Test. Darf nicht als reale Schadensinformation veröffentlicht werden."
+    }
+  ]
+}
