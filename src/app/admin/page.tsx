@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { DataQuality, Prisma, VehicleEventType } from '@prisma/client';
 import { db } from '@/lib/db';
 import { getSession, roleAllowed } from '@/lib/auth';
+import { hasActiveContract } from '@/lib/contract-policy';
 import { analyzeMileage } from '@/lib/mileage-analysis';
 import { VEHICLE_EVENT_TYPES } from '@/lib/event-types';
 import { groupAttributeConflicts } from '@/lib/providers/conflicts';
@@ -15,6 +16,10 @@ export const dynamic = 'force-dynamic';
 
 function first(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] ?? '' : value ?? '';
+}
+
+function jsonStringList(value: Prisma.JsonValue | null): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
 export default async function AdminPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
@@ -40,6 +45,7 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
     db.dataSource.findMany({
       include: {
         licenses: true,
+        contracts: true,
         coverages: { orderBy: [{ market: 'asc' }, { capability: 'asc' }] },
         providerRuns: { orderBy: { finishedAt: 'desc' }, take: 50 },
         _count: { select: { events: true, vehicleAttributes: true } }
@@ -89,7 +95,7 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
       <section className="hero">
         <span className="eyebrow">ADMIN · ROLE: {session.user.role}</span>
         <h1>Source Operations & Datenqualität</h1>
-        <p>Provider, Coverage, Lizenzstatus, Freshness, Mapping-Versionen, Fehler und Quellkonflikte.</p>
+        <p>Provider, operative Coverage, Lizenz- und Vertragsstatus, Freshness, Mapping-Versionen, Fehler und Quellkonflikte.</p>
       </section>
 
       <section className="adminStats">
@@ -111,7 +117,8 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
       </section>
 
       <section className="resultCard">
-        <h2>Provider & Coverage Matrix</h2>
+        <h2>Provider & operative Coverage</h2>
+        <p>Bestehende DB-Coverage ist maßgeblich. Provider-Code liefert nur Bootstrap-Defaults für noch nicht angelegte Coverage-Zeilen.</p>
         <div className="timeline">
           {registeredProviders.map((provider) => {
             const source = sources.find((item) => item.key === provider.key);
@@ -122,21 +129,29 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
             const errorRate = runs.length ? Math.round((failures / runs.length) * 100) : 0;
             const storeAllowed = Boolean(source && findLicenseForAction(source.licenses, 'STORE', now));
             const commercialAllowed = Boolean(source && findLicenseForAction(source.licenses, 'COMMERCIALIZE', now));
+            const contractActive = Boolean(source && hasActiveContract(source.contracts, now));
             const configuration = provider.configurationStatus?.() ?? { configured: true, missing: [] };
             const persistedCoverage = source?.coverages ?? [];
+            const requiresContract = persistedCoverage.some((coverage) => jsonStringList(coverage.requirements).includes('CONTRACT'));
+            const requiresLicense = persistedCoverage.some((coverage) => jsonStringList(coverage.requirements).includes('LICENSE'));
             return (
               <article key={provider.key}>
                 <strong>{provider.name}</strong>
                 <span>{provider.key} · {source?.active === false ? 'INAKTIV' : 'AKTIV'} · Auth {provider.authType ?? 'NONE'}</span>
                 <p>Capabilities: {provider.capabilities.join(', ')}</p>
-                <p>Credentials: {configuration.configured ? 'CONFIGURED ✓' : `MISSING (${configuration.missing.join(', ')})`} · Lizenz: Store {storeAllowed ? '✓' : '✗'} · Commercial {commercialAllowed ? '✓' : '✗'}</p>
-                <p>Refresh: {provider.refreshPolicy?.mode ?? 'LIVE'} / {provider.refreshPolicy?.maxAgeSeconds ? `${provider.refreshPolicy.maxAgeSeconds}s` : 'kein Cache-Fenster'} · Mapping: {provider.mappingVersion ?? '—'}</p>
+                <p>Credentials: {configuration.configured ? 'CONFIGURED ✓' : `MISSING (${configuration.missing.join(', ')})`}</p>
+                <p>Lizenz: {requiresLicense ? `erforderlich · Store ${storeAllowed ? '✓' : '✗'} · Commercial ${commercialAllowed ? '✓' : '✗'}` : 'nicht als Coverage-Voraussetzung markiert'}</p>
+                <p>Vertrag: {requiresContract ? (contractActive ? 'AKTIV & geprüft ✓' : 'FEHLT / nicht aktiv ✗') : 'nicht erforderlich'}</p>
+                <p>Refresh: {provider.refreshPolicy?.mode ?? 'LIVE'} / {provider.refreshPolicy?.maxAgeSeconds ? `${provider.refreshPolicy.maxAgeSeconds}s Default` : 'kein Provider-Default'} · Mapping: {provider.mappingVersion ?? '—'}</p>
                 <p>Letzter Lauf: {lastRun ? `${lastRun.status} · ${lastRun.decisionReason ?? lastRun.errorCode ?? 'OK'} · ${lastRun.finishedAt.toLocaleString('de-DE')}` : '—'} · Letzter erfolgreicher Providerkontakt: {lastSuccess ? lastSuccess.finishedAt.toLocaleString('de-DE') : '—'} · Fehlerrate letzte {runs.length}: {errorRate}%</p>
                 <p>Persistiert: {source?._count.vehicleAttributes ?? 0} Attribute · {source?._count.events ?? 0} Events</p>
                 {persistedCoverage.length > 0 ? (
-                  <ul>{persistedCoverage.map((coverage) => <li key={coverage.id}>{coverage.market} · {coverage.capability} · {coverage.status} · Mapping {coverage.mappingVersion ?? '—'} · Last success {coverage.lastSuccessfulAt ? coverage.lastSuccessfulAt.toLocaleString('de-DE') : '—'}</li>)}</ul>
+                  <ul>{persistedCoverage.map((coverage) => {
+                    const requirements = jsonStringList(coverage.requirements);
+                    return <li key={coverage.id}>{coverage.market} · {coverage.capability} · {coverage.status} · Voraussetzungen {requirements.join(', ') || 'keine'} · Freshness {coverage.freshnessSeconds ?? '—'}s · Mapping {coverage.mappingVersion ?? '—'} · Last success {coverage.lastSuccessfulAt ? coverage.lastSuccessfulAt.toLocaleString('de-DE') : '—'}</li>;
+                  })}</ul>
                 ) : (
-                  <p>Coverage-Metadaten werden beim nächsten Provider-Onboarding/Lauf synchronisiert.</p>
+                  <p>Noch keine operative Coverage angelegt.</p>
                 )}
                 {provider.key === DVSA_SOURCE_KEY && <p>Bulk: {lastDvsaBulk ? `${lastDvsaBulk.status} · ${lastDvsaBulk.fileName ?? 'Datei'}` : 'noch nicht verarbeitet'} · Delta: {lastDvsaDelta ? `${lastDvsaDelta.status} · ${lastDvsaDelta.fileName ?? 'Datei'}` : 'noch nicht verarbeitet'}</p>}
               </article>
@@ -175,13 +190,14 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
       <section className="reportGrid">
         <article className="resultCard reportPanel">
           <h2>Letzte Importjobs</h2>
-          {imports.length === 0 ? <p>Noch keine Importe.</p> : <div className="timeline">{imports.map((job) => <article key={job.id}><strong>{job.source.name}</strong><span>{job.status} · {job.format}</span><p>{job.rowsRead} gelesen · {job.rowsValidated} validiert · {job.rowsWritten} geschrieben · {job.rowsFailed} fehlgeschlagen</p></article>)}</div>}
+          {imports.length === 0 ? <p>Noch keine Importe.</p> : <div className="timeline">{imports.map((job) => <article key={job.id}><strong>{job.source.name}</strong><span>{job.status} · {job.format} · Mapping {job.mappingVersion}</span><p>{job.rowsRead} gelesen · {job.rowsValidated} validiert · {job.rowsWritten} geschrieben · {job.rowsFailed} fehlgeschlagen</p></article>)}</div>}
         </article>
         <article className="resultCard reportPanel">
-          <h2>Datenquellen & Lizenzstatus</h2>
+          <h2>Datenquellen, Rechte & Verträge</h2>
           <div className="timeline">{sources.map((source) => {
             const provider = providerByKey.get(source.key);
-            return <article key={source.id}><strong>{source.name}</strong><span>{source.key} · {source.active ? 'AKTIV' : 'INAKTIV'}{provider ? ' · PROVIDER' : ''}</span><p>{source.licenses.length === 0 ? 'Keine Lizenz dokumentiert.' : source.licenses.map((license) => `${license.licenseName}: Store ${license.canStore ? '✓' : '✗'}, Redistribute ${license.canRedistribute ? '✓' : '✗'}, Commercial ${license.canCommercialize ? '✓' : '✗'}, Retention ${license.retentionDays ?? '—'} Tage`).join(' · ')}</p></article>;
+            const contractActive = hasActiveContract(source.contracts, now);
+            return <article key={source.id}><strong>{source.name}</strong><span>{source.key} · {source.active ? 'AKTIV' : 'INAKTIV'}{provider ? ' · PROVIDER' : ''}</span><p>{source.licenses.length === 0 ? 'Keine Lizenz dokumentiert.' : source.licenses.map((license) => `${license.licenseName}: Store ${license.canStore ? '✓' : '✗'}, Redistribute ${license.canRedistribute ? '✓' : '✗'}, Commercial ${license.canCommercialize ? '✓' : '✗'}, Retention ${license.retentionDays ?? '—'} Tage`).join(' · ')}</p><p>{source.contracts.length === 0 ? 'Kein Vertrag dokumentiert.' : `Verträge: ${source.contracts.map((contract) => `${contract.name} ${contract.active ? 'aktiv' : 'inaktiv'}${contract.reviewedAt ? ' / geprüft' : ' / ungeprüft'}`).join(' · ')} · wirksam jetzt: ${contractActive ? '✓' : '✗'}`}</p></article>;
           })}</div>
         </article>
       </section>
