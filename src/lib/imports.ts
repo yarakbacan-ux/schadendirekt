@@ -7,6 +7,7 @@ import { findLicenseForAction, retentionExpiry } from '@/lib/license-policy';
 import { validateImportRecord, type ImportRecord } from '@/lib/import-validation';
 import { normalizeEventType } from '@/lib/event-types';
 import { getImportStorage } from '@/lib/import-storage';
+import { calculateImportAccounting } from '@/lib/import-accounting';
 
 export type ImportFormat = 'JSON' | 'CSV';
 
@@ -162,11 +163,11 @@ async function disposeJobPayload(job: {
     const storage = getImportStorage();
     if (job.object.provider === storage.provider) {
       await storage.delete(job.object.storageKey).catch(() => undefined);
+      await db.importObject.updateMany({
+        where: { importJobId: job.id, deletedAt: null },
+        data: { deletedAt: new Date() }
+      });
     }
-    await db.importObject.updateMany({
-      where: { importJobId: job.id, deletedAt: null },
-      data: { deletedAt: new Date() }
-    });
   }
   if (job.payload) await db.importPayload.deleteMany({ where: { importJobId: job.id } });
 }
@@ -236,17 +237,18 @@ export async function processImportJob(jobId: string, batchSize = 250) {
       }
     }
 
-    const validationFailures = inputs.length - valid.length;
-    const failed = validationFailures + failedBatchRows;
-    const status = failed === 0 ? 'COMPLETED' : written === 0 ? 'FAILED' : 'PARTIAL';
+    const accounting = calculateImportAccounting({
+      rowsRead: inputs.length,
+      rowsValidated: valid.length,
+      rowsWritten: written,
+      failedBatchRows
+    });
+    const status = accounting.rowsFailed === 0 ? 'COMPLETED' : accounting.rowsWritten === 0 ? 'FAILED' : 'PARTIAL';
     const result = await db.importJob.update({
       where: { id: job.id },
       data: {
         status,
-        rowsRead: inputs.length,
-        rowsValidated: valid.length,
-        rowsWritten: written,
-        rowsFailed: failed,
+        ...accounting,
         errorLog: errors,
         finishedAt: new Date()
       }
