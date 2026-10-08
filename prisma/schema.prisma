@@ -172,6 +172,7 @@ model DataSource {
   vehicleAttributes VehicleAttribute[]
   importJobs        ImportJob[]
   licenses          SourceLicense[]
+  contracts         SourceContract[]
   providerRuns      ProviderRun[]
   coverages         ProviderCoverage[]
 }
@@ -220,27 +221,29 @@ model ProviderRun {
 }
 
 model ImportJob {
-  id            String        @id @default(cuid())
-  sourceId      String
-  status        ImportStatus  @default(PENDING)
-  format        String
-  fileName      String?
-  checksum      String?
-  rowsRead      Int           @default(0)
-  rowsValidated Int           @default(0)
-  rowsWritten   Int           @default(0)
-  rowsFailed    Int           @default(0)
-  errorLog      Json?
-  startedAt     DateTime?
-  finishedAt    DateTime?
-  createdAt     DateTime      @default(now())
-  source        DataSource    @relation(fields: [sourceId], references: [id], onDelete: Restrict)
-  payload       ImportPayload?
-  object        ImportObject?
+  id             String        @id @default(cuid())
+  sourceId       String
+  status         ImportStatus  @default(PENDING)
+  format         String
+  mappingVersion String        @default("generic-import-v1")
+  fileName       String?
+  checksum       String?
+  rowsRead       Int           @default(0)
+  rowsValidated  Int           @default(0)
+  rowsWritten    Int           @default(0)
+  rowsFailed     Int           @default(0)
+  errorLog       Json?
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  source         DataSource    @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+  payload        ImportPayload?
+  object         ImportObject?
 
   @@index([sourceId, createdAt])
   @@index([status])
   @@index([checksum])
+  @@index([sourceId, checksum, mappingVersion])
 }
 
 model ImportPayload {
@@ -289,6 +292,25 @@ model SourceLicense {
   source               DataSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
   @@index([sourceId])
+  @@index([validFrom, validUntil])
+}
+
+model SourceContract {
+  id         String     @id @default(cuid())
+  sourceId   String
+  name       String
+  reference  String?
+  active     Boolean    @default(false)
+  validFrom  DateTime?
+  validUntil DateTime?
+  reviewedBy String?
+  reviewedAt DateTime?
+  notes      String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  source     DataSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId, active])
   @@index([validFrom, validUntil])
 }
 
