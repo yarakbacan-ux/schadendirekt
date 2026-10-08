@@ -46,11 +46,17 @@ export type ProviderLookupResult = {
   warnings?: string[];
 };
 
+export type ProviderConfigurationStatus = {
+  configured: boolean;
+  missing: string[];
+};
+
 export type VehicleDataProvider = {
   key: string;
   name: string;
   description: string;
   capabilities: readonly ProviderCapability[];
+  configurationStatus?: () => ProviderConfigurationStatus;
   lookup(vin: string, context: ProviderLookupContext): Promise<ProviderLookupResult>;
 };
 
