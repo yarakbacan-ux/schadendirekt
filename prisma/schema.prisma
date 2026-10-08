@@ -202,23 +202,41 @@ model ProviderCoverage {
 }
 
 model ProviderRun {
-  id             String            @id @default(cuid())
-  sourceId       String
-  vin            String?           @db.VarChar(17)
-  status         ProviderRunStatus
-  cached         Boolean           @default(false)
-  durationMs     Int
-  errorCode      String?
-  decisionReason String?
-  market         String?
-  mappingVersion String?
-  startedAt      DateTime          @default(now())
-  finishedAt     DateTime          @default(now())
-  source         DataSource        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  id               String                  @id @default(cuid())
+  sourceId         String
+  vin              String?                 @db.VarChar(17)
+  status           ProviderRunStatus
+  cached           Boolean                 @default(false)
+  durationMs       Int
+  errorCode        String?
+  decisionReason   String?
+  market           String?
+  mappingVersion   String?
+  startedAt        DateTime                @default(now())
+  finishedAt       DateTime                @default(now())
+  source           DataSource              @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  capabilityScopes ProviderRunCapability[]
 
   @@index([sourceId, finishedAt])
   @@index([status, finishedAt])
   @@index([vin])
+  @@index([sourceId, vin, market, mappingVersion, finishedAt])
+}
+
+model ProviderRunCapability {
+  id             String            @id @default(cuid())
+  providerRunId  String
+  capability     String
+  market         String
+  mappingVersion String
+  status         ProviderRunStatus
+  decisionReason String?
+  finishedAt     DateTime          @default(now())
+  providerRun    ProviderRun       @relation(fields: [providerRunId], references: [id], onDelete: Cascade)
+
+  @@unique([providerRunId, capability])
+  @@index([capability, market, mappingVersion, finishedAt])
+  @@index([status, finishedAt])
 }
 
 model ImportJob {
@@ -283,6 +301,8 @@ model SourceLicense {
   canRedistribute      Boolean    @default(false)
   canCommercialize     Boolean    @default(false)
   retentionDays        Int?
+  markets              Json?
+  capabilities         Json?
   notes                String?
   reviewedBy           String?
   validFrom            DateTime?
@@ -297,19 +317,21 @@ model SourceLicense {
 }
 
 model SourceContract {
-  id         String     @id @default(cuid())
-  sourceId   String
-  name       String
-  reference  String?
-  active     Boolean    @default(false)
-  validFrom  DateTime?
-  validUntil DateTime?
-  reviewedBy String?
-  reviewedAt DateTime?
-  notes      String?
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
-  source     DataSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  id           String     @id @default(cuid())
+  sourceId     String
+  name         String
+  reference    String?
+  active       Boolean    @default(false)
+  validFrom    DateTime?
+  validUntil   DateTime?
+  markets      Json?
+  capabilities Json?
+  reviewedBy   String?
+  reviewedAt   DateTime?
+  notes        String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  source       DataSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
 
   @@index([sourceId, active])
   @@index([validFrom, validUntil])
