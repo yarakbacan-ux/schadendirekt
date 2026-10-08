@@ -1,0 +1,3 @@
+vin,externalId,eventType,eventDate,country,mileageKm,title,description
+WBA12345678901234,fixture-csv-001,ODOMETER_READING,2025-05-10T00:00:00.000Z,DE,84500,TESTDATEN Kilometerstand,Künstlicher Datensatz ausschließlich zum lokalen Test
+WBA12345678901234,fixture-csv-002,DAMAGE_RECORD,2025-08-02T00:00:00.000Z,DE,,TESTDATEN Schadenereignis,Künstlicher Datensatz ausschließlich zum lokalen Test
