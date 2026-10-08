@@ -12,7 +12,7 @@ const config: DvsaConfig = {
 
 describe('DVSA configuration', () => {
   it('reports missing credential names without exposing values', () => {
-    const status = getDvsaConfigurationStatus({ DVSA_CLIENT_ID: 'id' } as NodeJS.ProcessEnv);
+    const status = getDvsaConfigurationStatus({ NODE_ENV: 'test', DVSA_CLIENT_ID: 'id' });
     expect(status.configured).toBe(false);
     expect(status.missing).toEqual(expect.arrayContaining(['DVSA_CLIENT_SECRET', 'DVSA_API_KEY']));
   });

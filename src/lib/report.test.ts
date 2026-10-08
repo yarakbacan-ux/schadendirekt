@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { describe, expect, it } from 'vitest';
 import { serializeVehicleReport } from '@/lib/report';
 
@@ -15,7 +16,39 @@ const blockedLicense = {
   canCommercialize: false
 };
 
+type TestEvent = {
+  id: string;
+  eventType: string;
+  sourceEventType: string | null;
+  eventDate: Date | null;
+  country: string | null;
+  mileageKm: number | null;
+  title: string;
+  description: string | null;
+  quality: string;
+  rawPayload: Prisma.JsonValue | null;
+  importedAt: Date;
+  source: {
+    key: string;
+    name: string;
+    licenses: Array<typeof allowedLicense>;
+  };
+};
+
 function baseVehicle() {
+  const events: TestEvent[] = [
+    {
+      id: 'allowed-event', eventType: 'ODOMETER_READING', sourceEventType: 'Mileage', eventDate: new Date('2025-01-01'),
+      country: 'DE', mileageKm: 50_000, title: 'Kilometerstand', description: null, quality: 'VERIFIED', rawPayload: null, importedAt: new Date('2026-01-01'),
+      source: { key: 'licensed-source', name: 'Licensed source', licenses: [allowedLicense] }
+    },
+    {
+      id: 'blocked-event', eventType: 'DAMAGE_RECORD', sourceEventType: 'Damage', eventDate: new Date('2025-02-01'),
+      country: 'DE', mileageKm: 51_000, title: 'Nicht veröffentlichbar', description: null, quality: 'VERIFIED', rawPayload: null, importedAt: new Date('2026-01-01'),
+      source: { key: 'blocked-source', name: 'Blocked source', licenses: [blockedLicense] }
+    }
+  ];
+
   return {
     vin: 'WBA00000000000000',
     make: 'BMW',
@@ -40,18 +73,7 @@ function baseVehicle() {
         source: { key: 'nhtsa-vpic', name: 'NHTSA vPIC', licenses: [allowedLicense] }
       }
     ],
-    events: [
-      {
-        id: 'allowed-event', eventType: 'ODOMETER_READING', sourceEventType: 'Mileage', eventDate: new Date('2025-01-01'),
-        country: 'DE', mileageKm: 50_000, title: 'Kilometerstand', description: null, quality: 'VERIFIED', rawPayload: null, importedAt: new Date('2026-01-01'),
-        source: { key: 'licensed-source', name: 'Licensed source', licenses: [allowedLicense] }
-      },
-      {
-        id: 'blocked-event', eventType: 'DAMAGE_RECORD', sourceEventType: 'Damage', eventDate: new Date('2025-02-01'),
-        country: 'DE', mileageKm: 51_000, title: 'Nicht veröffentlichbar', description: null, quality: 'VERIFIED', rawPayload: null, importedAt: new Date('2026-01-01'),
-        source: { key: 'blocked-source', name: 'Blocked source', licenses: [blockedLicense] }
-      }
-    ]
+    events
   };
 }
 
