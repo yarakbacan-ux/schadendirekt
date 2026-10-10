@@ -1,3 +1,5 @@
+import { policyScopeAllows } from '@/lib/policy-scope';
+
 export type PolicyScope = {
   market?: string | null;
   capability?: string | null;
@@ -21,21 +23,8 @@ export type LicenseLike = {
 
 export type LicenseAction = 'STORE' | 'REDISTRIBUTE' | 'COMMERCIALIZE';
 
-function normalizedScopeValues(value: unknown): string[] | null {
-  if (value == null) return null;
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is string => typeof item === 'string')
-    .map((item) => item.trim().toUpperCase())
-    .filter(Boolean);
-}
-
-function matchesScope(value: unknown, requested: string | null | undefined): boolean {
-  const allowed = normalizedScopeValues(value);
-  if (allowed == null || allowed.length === 0) return true;
-  const normalized = requested?.trim().toUpperCase() || null;
-  if (!normalized) return allowed.includes('*');
-  return allowed.includes('*') || allowed.includes(normalized);
+function matchesScope(value: unknown, requested: string | null | undefined, kind: 'market' | 'capability'): boolean {
+  return policyScopeAllows(value, requested, kind);
 }
 
 export function isLicenseReviewed(license: LicenseLike): boolean {
@@ -58,8 +47,8 @@ export function permitsLicenseAction(
   scope: PolicyScope = {}
 ): boolean {
   if (!isLicenseActive(license, at)) return false;
-  if (!matchesScope(license.markets, scope.market)) return false;
-  if (!matchesScope(license.capabilities, scope.capability)) return false;
+  if (!matchesScope(license.markets, scope.market, 'market')) return false;
+  if (!matchesScope(license.capabilities, scope.capability, 'capability')) return false;
   if (action === 'STORE') return license.canStore;
   if (action === 'REDISTRIBUTE') return license.canRedistribute;
   return license.canRedistribute && license.canCommercialize;
