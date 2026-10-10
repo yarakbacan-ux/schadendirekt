@@ -5,6 +5,7 @@ import { MemoryImportStorage, setImportStorageForTests } from './import-storage'
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const createdSourceIds: string[] = [];
+const REPROCESS_VIN = 'WBA82345678901234';
 
 afterEach(async () => {
   setImportStorageForTests(null);
@@ -14,6 +15,7 @@ afterEach(async () => {
     await db.sourceLicense.deleteMany({ where: { sourceId } });
     await db.dataSource.deleteMany({ where: { id: sourceId } });
   }
+  await db.vehicle.deleteMany({ where: { vin: REPROCESS_VIN } });
 });
 
 async function createSource(prefix: string) {
@@ -61,7 +63,7 @@ describeDb('import hardening', () => {
 
     const job = await queueImport(
       source.key,
-      JSON.stringify([{ vin: 'WBA12345678901234', eventType: 'SERVICE', title: 'Test' }]),
+      JSON.stringify([{ vin: 'WBA72345678901234', eventType: 'SERVICE', title: 'Test' }]),
       'JSON'
     );
     const persisted = await db.importJob.findUnique({ where: { id: job.id }, include: { object: true, payload: true } });
@@ -81,7 +83,7 @@ describeDb('import hardening', () => {
     setImportStorageForTests(storage);
     const job = await queueImport(
       source.key,
-      JSON.stringify([{ vin: 'WBA12345678901234', eventType: 'SERVICE', title: 'Retained import', externalId: `raw-${Date.now()}` }]),
+      JSON.stringify([{ vin: REPROCESS_VIN, eventType: 'SERVICE', title: 'Retained import', externalId: `raw-${Date.now()}` }]),
       'JSON',
       undefined,
       'retained.json',
