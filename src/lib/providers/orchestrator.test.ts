@@ -4,7 +4,7 @@ import { runVehicleProviders } from '@/lib/providers/orchestrator';
 import type { VehicleDataProvider } from '@/lib/providers/types';
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
-const VIN = 'WBA12345678901234';
+const VIN = 'WBA92345678901234';
 const SOURCE_KEY = 'ci-provider';
 const CONTRACT_SOURCE_KEY = 'ci-contract-provider';
 
