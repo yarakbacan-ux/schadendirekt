@@ -53,6 +53,23 @@ function filterRawPayload(event: ProviderEvent, allowed: ReadonlySet<ProviderCap
   return Object.keys(filtered).length > 0 ? filtered : null;
 }
 
+function odometerProjection(event: ProviderEvent, allowed: ReadonlySet<ProviderCapability>): ProviderEvent | null {
+  if (!allowed.has('ODOMETER') || event.mileageKm == null) return null;
+  return {
+    externalId: `${event.externalId}:odometer`,
+    eventType: 'ODOMETER_READING',
+    sourceEventType: event.sourceEventType ? `${event.sourceEventType}_ODOMETER` : 'ODOMETER',
+    eventDate: event.eventDate ?? null,
+    country: event.country ?? null,
+    mileageKm: event.mileageKm,
+    title: 'Kilometerstand',
+    description: null,
+    quality: event.quality,
+    rawPayload: filterRawPayload(event, new Set<ProviderCapability>(['ODOMETER'])),
+    rawPayloadCapabilities: event.rawPayloadCapabilities
+  };
+}
+
 export function filterProviderResultByCapabilities(
   result: ProviderLookupResult,
   capabilities: readonly ProviderCapability[]
@@ -62,15 +79,23 @@ export function filterProviderResultByCapabilities(
     const capability = attributeCapability(attribute);
     return capability ? allowed.has(capability) : false;
   });
-  const events = result.events
-    .filter((event) => {
-      const capability = eventCapability(event);
-      return capability ? allowed.has(capability) : false;
-    })
-    .map((event) => {
+  const events: ProviderEvent[] = [];
+
+  for (const event of result.events) {
+    const primaryCapability = eventCapability(event);
+    if (primaryCapability && allowed.has(primaryCapability)) {
       const next: ProviderEvent = { ...event, rawPayload: filterRawPayload(event, allowed) };
       if (!allowed.has('ODOMETER')) next.mileageKm = null;
-      return next;
-    });
+      events.push(next);
+      continue;
+    }
+
+    // Composite provider records (e.g. an MOT inspection carrying a mileage reading) must not
+    // leak the primary capability when only the sub-capability is licensed. Emit a sanitized
+    // odometer projection instead of the inspection payload.
+    const projection = odometerProjection(event, allowed);
+    if (projection) events.push(projection);
+  }
+
   return { ...result, attributes, events };
 }
