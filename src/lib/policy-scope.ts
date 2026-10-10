@@ -8,14 +8,19 @@ type ParsedPolicyScope =
   | { mode: 'VALUES'; values: ReadonlySet<string> };
 
 const CAPABILITIES = new Set<string>(PROVIDER_CAPABILITIES);
+const KNOWN_MARKETS = new Set([
+  'AT', 'BE', 'BG', 'CH', 'CY', 'CZ', 'DE', 'DK', 'EE', 'ES', 'FI', 'FR', 'GB', 'GR', 'HR',
+  'HU', 'IE', 'IS', 'IT', 'LI', 'LT', 'LU', 'LV', 'MT', 'NL', 'NO', 'PL', 'PT', 'RO', 'SE',
+  'SI', 'SK', 'US', 'CA'
+]);
 
 function normalizeToken(value: string, kind: PolicyScopeKind): string | null {
   const normalized = value.trim().toUpperCase();
   if (!normalized) return null;
   if (normalized === '*') return '*';
   if (kind === 'capability') return CAPABILITIES.has(normalized) ? normalized : null;
-  // Operational provider markets are ISO-like two-letter country codes. Aliases are not accepted here.
-  return /^[A-Z]{2}$/.test(normalized) ? normalized : null;
+  // Markets are deliberately allow-listed. Adding a new operational market requires an explicit code review.
+  return KNOWN_MARKETS.has(normalized) ? normalized : null;
 }
 
 export function parsePolicyScope(value: unknown, kind: PolicyScopeKind): ParsedPolicyScope {
