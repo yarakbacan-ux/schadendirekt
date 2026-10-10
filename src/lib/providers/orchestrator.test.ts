@@ -20,7 +20,7 @@ const provider: VehicleDataProvider = {
     return {
       cached: false,
       availability: 'DATA',
-      attributes: [{ field: 'make', value: 'BMW', sourceField: 'brand', rawValue: 'BMW', quality: 'VERIFIED', fetchedAt: new Date('2026-01-01') }],
+      attributes: [{ field: 'make', value: 'BMW', sourceField: 'brand', rawValue: 'BMW', capability: 'VEHICLE_SPECS', quality: 'VERIFIED', fetchedAt: new Date('2026-01-01') }],
       events: [{ externalId: 'odo-1', eventType: 'ODOMETER_READING', eventDate: new Date('2025-01-01'), mileageKm: 12_345, title: 'Kilometerstand', quality: 'VERIFIED' }]
     };
   }
@@ -90,6 +90,45 @@ describeDb('provider orchestrator persistence policy', () => {
     expect(vehicle.events).toHaveLength(0);
   });
 
+  it('persists only STORE capabilities while returning COMMERCIALIZE-only capability data transiently', async () => {
+    await cleanup();
+    const source = await db.dataSource.create({ data: { key: SOURCE_KEY, name: SOURCE_KEY } });
+    await db.sourceLicense.createMany({ data: [
+      {
+        sourceId: source.id,
+        licenseName: 'Specs storage only',
+        canStore: true,
+        canRedistribute: false,
+        canCommercialize: false,
+        capabilities: ['VEHICLE_SPECS'],
+        reviewedAt: new Date(),
+        reviewedBy: 'CI'
+      },
+      {
+        sourceId: source.id,
+        licenseName: 'Odometer commercial only',
+        canStore: false,
+        canRedistribute: true,
+        canCommercialize: true,
+        capabilities: ['ODOMETER'],
+        reviewedAt: new Date(),
+        reviewedBy: 'CI'
+      }
+    ] });
+
+    const outcome = await runVehicleProviders(VIN, { providers: [provider], origin: 'PUBLIC_LOOKUP' });
+    expect(outcome[0]).toMatchObject({ status: 'SUCCESS', persisted: true });
+    expect(outcome[0]?.attributes).toHaveLength(0);
+    expect(outcome[0]?.events).toHaveLength(1);
+    expect(outcome[0]?.events[0]).toMatchObject({ eventType: 'ODOMETER_READING', mileageKm: 12_345 });
+
+    const vehicle = await db.vehicle.findUniqueOrThrow({ where: { vin: VIN }, include: { attributes: true, events: true } });
+    expect(vehicle.make).toBe('BMW');
+    expect(vehicle.attributes).toHaveLength(1);
+    expect(vehicle.attributes[0]).toMatchObject({ field: 'make', capability: 'VEHICLE_SPECS' });
+    expect(vehicle.events).toHaveLength(0);
+  });
+
   it('persists normalized data with mapping version and coverage after an explicit storage license exists', async () => {
     await cleanup();
     await createLicense(SOURCE_KEY, true);
@@ -102,7 +141,7 @@ describeDb('provider orchestrator persistence policy', () => {
     const vehicle = await db.vehicle.findUniqueOrThrow({ where: { vin: VIN }, include: { attributes: true, events: true } });
     expect(vehicle.make).toBe('BMW');
     expect(vehicle.attributes).toHaveLength(1);
-    expect(vehicle.attributes[0]).toMatchObject({ field: 'make', value: 'BMW', sourceField: 'brand', mappingVersion: 'ci-map-v1' });
+    expect(vehicle.attributes[0]).toMatchObject({ field: 'make', value: 'BMW', sourceField: 'brand', capability: 'VEHICLE_SPECS', mappingVersion: 'ci-map-v1' });
     expect(vehicle.events).toHaveLength(1);
     expect(vehicle.events[0]).toMatchObject({ eventType: 'ODOMETER_READING', mileageKm: 12_345, mappingVersion: 'ci-map-v1' });
 
@@ -131,7 +170,14 @@ describeDb('provider orchestrator persistence policy', () => {
     expect(missingContract[0]).toMatchObject({ status: 'SKIPPED', decisionReason: 'CONTRACT_REQUIRED' });
 
     await db.sourceContract.create({
-      data: { sourceId: source.id, name: 'CI partner agreement', active: true, reviewedAt: new Date(), reviewedBy: 'CI' }
+      data: {
+        sourceId: source.id,
+        name: 'CI partner agreement',
+        reference: 'CI-CONTRACT-1',
+        active: true,
+        reviewedAt: new Date(),
+        reviewedBy: 'CI'
+      }
     });
     const bothPresent = await runVehicleProviders(VIN, { providers: [contractProvider], market: 'DE' });
     expect(bothPresent[0]?.status).toBe('NO_DATA');
