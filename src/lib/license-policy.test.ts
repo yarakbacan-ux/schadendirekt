@@ -47,6 +47,8 @@ describe('license policy', () => {
     expect(permitsLicenseAction({ ...base, markets: 'DE' as unknown, capabilities: ['INSPECTION'] }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(false);
     expect(permitsLicenseAction({ ...base, markets: ['DE'], capabilities: ['NOT_A_CAPABILITY'] }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(false);
     expect(permitsLicenseAction({ ...base, markets: ['GERMANY'], capabilities: ['INSPECTION'] }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(false);
+    expect(permitsLicenseAction({ ...base, markets: null, capabilities: null }, 'STORE', at, { market: 'GERMANY', capability: 'INSPECTION' })).toBe(false);
+    expect(permitsLicenseAction({ ...base, markets: null, capabilities: null }, 'STORE', at, { market: 'DE', capability: 'NOT_A_CAPABILITY' })).toBe(false);
   });
 
   it('calculates retention expiry', () => {
