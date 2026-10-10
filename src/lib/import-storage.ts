@@ -229,12 +229,13 @@ export class S3CompatibleImportStorage implements ImportStorage {
     const meter = meteredTransform(hash, maxBytes, (size) => { sizeBytes = size; });
     const body = Readable.from(content).pipe(meter);
     try {
-      const response = await this.fetchImpl(url, {
+      const requestInit = {
         method: 'PUT',
         headers: this.signedHeaders('PUT', url, 'UNSIGNED-PAYLOAD'),
         body,
         duplex: 'half'
-      } as RequestInit & { duplex: 'half' });
+      } as unknown as RequestInit;
+      const response = await this.fetchImpl(url, requestInit);
       if (!response.ok) throw new Error(`IMPORT_STORAGE_S3_PUT_${response.status}`);
       return { provider: this.provider, key, sizeBytes, checksum: hash.digest('hex') };
     } catch (error) {
