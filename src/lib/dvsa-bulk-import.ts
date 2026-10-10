@@ -347,7 +347,8 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
     include: { object: true, source: { include: { licenses: true } } }
   });
   if (!job?.object) throw new Error('DVSA_IMPORT_OBJECT_NOT_FOUND');
-  if (job.object.deletedAt) throw new Error('DVSA_IMPORT_OBJECT_NOT_AVAILABLE');
+  const importObject = job.object;
+  if (importObject.deletedAt) throw new Error('DVSA_IMPORT_OBJECT_NOT_AVAILABLE');
   if (job.format !== DVSA_IMPORT_FORMAT) throw new Error('NOT_DVSA_IMPORT_JOB');
   if (job.status !== 'RUNNING') throw new Error('IMPORT_JOB_NOT_CLAIMED');
 
@@ -358,13 +359,13 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
       where: { id: job.id },
       data: { status: 'FAILED', finishedAt: new Date(), rowsFailed: 1, errorLog: [{ index: -1, message: 'SOURCE_STORAGE_NOT_LICENSED_FOR_DVSA_ARCHIVE', rows: 1 }] }
     });
-    await deleteDvsaObjectForPolicy(job);
+    await deleteDvsaObjectForPolicy({ id: job.id, object: importObject });
     return result;
   }
 
   const storeCapabilities = licenseRows.filter((row) => Boolean(row.license)).map((row) => row.capability);
   const storage = getImportStorage();
-  if (job.object.provider !== storage.provider) throw new Error('IMPORT_STORAGE_PROVIDER_UNAVAILABLE');
+  if (importObject.provider !== storage.provider) throw new Error('IMPORT_STORAGE_PROVIDER_UNAVAILABLE');
 
   let rowsRead = 0;
   let rowsValidated = 0;
@@ -392,7 +393,7 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
   };
 
   try {
-    const stream = await storage.openReadStream(job.object.storageKey);
+    const stream = await storage.openReadStream(importObject.storageKey);
     for await (const record of parseDvsaNdjsonChunks(stream)) {
       rowsRead += 1;
       batch.push(record);
