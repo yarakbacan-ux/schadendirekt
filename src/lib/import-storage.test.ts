@@ -64,7 +64,7 @@ describe('ImportStorage', () => {
       }
       if (init?.method === 'GET') {
         const value = objects.get(key);
-        return value ? new Response(value, { status: 200 }) : new Response('', { status: 404 });
+        return value ? new Response(value.toString('utf8'), { status: 200 }) : new Response('', { status: 404 });
       }
       return new Response('', { status: 405 });
     };
