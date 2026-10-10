@@ -40,6 +40,17 @@ describe('provider capability filtering', () => {
     expect(inspection.events[0]?.mileageKm).toBeNull();
     expect(inspection.events[0]?.rawPayload).toEqual({ testResult: 'PASSED' });
 
+    const odometerOnly = filterProviderResultByCapabilities(result(), ['ODOMETER']);
+    expect(odometerOnly.events).toHaveLength(1);
+    expect(odometerOnly.events[0]).toMatchObject({
+      externalId: 'mot-1:odometer',
+      eventType: 'ODOMETER_READING',
+      mileageKm: 12345,
+      title: 'Kilometerstand',
+      rawPayload: { odometer: { value: 12345 } }
+    });
+    expect(odometerOnly.events[0]?.rawPayload).not.toHaveProperty('testResult');
+
     const combined = filterProviderResultByCapabilities(result(), ['INSPECTION', 'ODOMETER', 'REGISTRATION']);
     expect(combined.events[0]?.mileageKm).toBe(12345);
     expect(combined.events[0]?.rawPayload).toEqual({
