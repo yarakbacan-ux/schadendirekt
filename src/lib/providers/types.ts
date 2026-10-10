@@ -47,6 +47,7 @@ export type ProviderAttribute = {
   value: string;
   sourceField: string | null;
   rawValue?: string | null;
+  capability?: ProviderCapability | null;
   quality: DataQuality;
   fetchedAt: Date;
 };
@@ -62,10 +63,12 @@ export type ProviderEvent = {
   description?: string | null;
   quality: DataQuality;
   rawPayload?: Record<string, unknown> | null;
+  rawPayloadCapabilities?: Readonly<Record<string, ProviderCapability>> | null;
 };
 
 export type ProviderLookupContext = {
   canStore: boolean;
+  storeCapabilities?: readonly ProviderCapability[];
   now: Date;
   market: string | null;
   capabilities: readonly ProviderCapability[];

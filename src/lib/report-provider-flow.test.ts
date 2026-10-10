@@ -69,14 +69,14 @@ function marketProvider(market: 'GB' | 'DE'): VehicleDataProvider {
     key: GLOBAL_KEY,
     name: 'Provenance market test provider',
     description: 'Global provider returning a source-backed market attribute',
-    capabilities: ['VEHICLE_SPECS'],
+    capabilities: ['REGISTRATION'],
     mappingVersion: 'market-test-v1',
-    coverage: [{ market: '*', capabilities: ['VEHICLE_SPECS'], status: 'LIVE', allowUnknownMarket: true }],
+    coverage: [{ market: '*', capabilities: ['REGISTRATION'], status: 'LIVE', allowUnknownMarket: true }],
     async lookup() {
       return {
         cached: false,
         availability: 'DATA',
-        attributes: [{ field: 'market', value: market, sourceField: 'registrationMarket', rawValue: market, quality: 'VERIFIED', fetchedAt: new Date() }],
+        attributes: [{ field: 'market', value: market, sourceField: 'registrationMarket', rawValue: market, capability: 'REGISTRATION', quality: 'VERIFIED', fetchedAt: new Date() }],
         events: []
       };
     }
@@ -156,6 +156,7 @@ describeDb('dynamic report provider flow', () => {
         field: 'market',
         value: 'DE',
         sourceField: 'registrationMarket',
+        capability: 'REGISTRATION',
         quality: 'VERIFIED',
         mappingVersion: 'fixture-v1'
       }
@@ -179,7 +180,7 @@ describeDb('dynamic report provider flow', () => {
         return {
           cached: false,
           availability: 'DATA',
-          attributes: [{ field: 'make', value: 'TRANSIENT', sourceField: 'make', quality: 'VERIFIED', fetchedAt: new Date() }],
+          attributes: [{ field: 'make', value: 'TRANSIENT MAKE', sourceField: 'make', capability: 'VEHICLE_SPECS', quality: 'VERIFIED', fetchedAt: new Date() }],
           events: []
         };
       }
@@ -188,12 +189,11 @@ describeDb('dynamic report provider flow', () => {
     await licensedSource(EPHEMERAL_KEY, false);
 
     const report = await getVehicleReport(VIN_EPHEMERAL, { providerKeys: [EPHEMERAL_KEY] });
-    expect(report.status).toBe('DATA_AVAILABLE');
-    expect((report.vehicle as Record<string, unknown>).make).toBe('TRANSIENT');
+    expect(report.vehicle).toMatchObject({ vin: VIN_EPHEMERAL, make: 'TRANSIENT MAKE' });
     expect(report.coverage).toContainEqual(expect.objectContaining({ providerKey: EPHEMERAL_KEY, state: 'DATA' }));
 
-    const source = await db.dataSource.findUniqueOrThrow({ where: { key: EPHEMERAL_KEY } });
-    expect(await db.vehicleAttribute.count({ where: { sourceId: source.id } })).toBe(0);
-    expect(await db.vehicleEvent.count({ where: { sourceId: source.id } })).toBe(0);
+    const persisted = await db.vehicle.findUniqueOrThrow({ where: { vin: VIN_EPHEMERAL } });
+    expect(persisted.make).toBeNull();
+    expect(await db.vehicleAttribute.count({ where: { vehicleId: persisted.id } })).toBe(0);
   });
 });

@@ -32,7 +32,7 @@ async function createSource() {
       canCommercialize: false,
       retentionDays: 1,
       markets: ['GB'],
-      capabilities: ['INSPECTION'],
+      capabilities: ['VEHICLE_SPECS', 'ODOMETER', 'INSPECTION', 'REGISTRATION'],
       reviewedAt: new Date(),
       reviewedBy: 'CI'
     }
@@ -130,7 +130,7 @@ describeDb('DVSA bulk/delta import worker', () => {
       where: { vehicleId_sourceId_field: { vehicleId: updatedVehicle.id, sourceId: source.id, field: 'make' } }
     });
     expect(updatedEvents.map((event) => event.externalId)).toEqual(['mot:1002']);
-    expect(updatedMake?.value).toBe('TEST MAKE UPDATED');
+    expect(updatedMake).toMatchObject({ value: 'TEST MAKE UPDATED', capability: 'VEHICLE_SPECS' });
 
     const deletedVehicle = await db.vehicle.findUniqueOrThrow({ where: { vin: vinDeleted } });
     expect(await db.vehicleEvent.count({ where: { vehicleId: deletedVehicle.id, sourceId: source.id } })).toBe(0);
@@ -174,5 +174,6 @@ describeDb('DVSA bulk/delta import worker', () => {
     state = await db.importJob.findUniqueOrThrow({ where: { id: job.id }, include: { object: true } });
     expect(state).toMatchObject({ status: 'PARTIAL', rowsRead: 2, rowsValidated: 1, rowsWritten: 1, rowsFailed: 1 });
     expect(await db.vehicleEvent.count({ where: { vehicleId: vehicle.id, sourceId: source.id, externalId: 'mot:3001' } })).toBe(1);
+    expect(await db.importAuditLog.count({ where: { importJobId: job.id, action: 'RETRY' } })).toBe(1);
   });
 });

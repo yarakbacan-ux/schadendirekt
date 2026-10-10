@@ -138,6 +138,7 @@ model VehicleAttribute {
   value          String      @db.Text
   sourceField    String?
   rawValue       String?     @db.Text
+  capability     String?
   quality        DataQuality @default(UNVERIFIED)
   conflict       Boolean     @default(false)
   mappingVersion String?
@@ -149,6 +150,7 @@ model VehicleAttribute {
   @@index([vehicleId, field])
   @@index([sourceId])
   @@index([conflict])
+  @@index([capability])
 }
 
 model VinDecodeCache {
@@ -241,24 +243,25 @@ model ProviderRunCapability {
 }
 
 model ImportJob {
-  id             String        @id @default(cuid())
+  id             String           @id @default(cuid())
   sourceId       String
-  status         ImportStatus  @default(PENDING)
+  status         ImportStatus     @default(PENDING)
   format         String
-  mappingVersion String        @default("generic-import-v1")
+  mappingVersion String           @default("generic-import-v1")
   fileName       String?
   checksum       String?
-  rowsRead       Int           @default(0)
-  rowsValidated  Int           @default(0)
-  rowsWritten    Int           @default(0)
-  rowsFailed     Int           @default(0)
+  rowsRead       Int              @default(0)
+  rowsValidated  Int              @default(0)
+  rowsWritten    Int              @default(0)
+  rowsFailed     Int              @default(0)
   errorLog       Json?
   startedAt      DateTime?
   finishedAt     DateTime?
-  createdAt      DateTime      @default(now())
-  source         DataSource    @relation(fields: [sourceId], references: [id], onDelete: Restrict)
+  createdAt      DateTime         @default(now())
+  source         DataSource       @relation(fields: [sourceId], references: [id], onDelete: Restrict)
   payload        ImportPayload?
   object         ImportObject?
+  auditLogs      ImportAuditLog[]
 
   @@index([sourceId, createdAt])
   @@index([status])
@@ -282,7 +285,7 @@ model ImportObject {
   importJobId String    @unique
   provider    String
   storageKey  String    @unique
-  sizeBytes   Int
+  sizeBytes   BigInt
   checksum    String
   expiresAt   DateTime?
   deletedAt   DateTime?
@@ -291,6 +294,20 @@ model ImportObject {
 
   @@index([expiresAt])
   @@index([deletedAt])
+}
+
+model ImportAuditLog {
+  id                 String    @id @default(cuid())
+  importJobId        String
+  action             String
+  fromMappingVersion String?
+  toMappingVersion   String?
+  details            Json?
+  createdAt          DateTime  @default(now())
+  importJob          ImportJob @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+
+  @@index([importJobId, createdAt])
+  @@index([action, createdAt])
 }
 
 model SourceTombstone {

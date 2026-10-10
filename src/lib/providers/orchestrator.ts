@@ -4,11 +4,11 @@ import { hasActiveContract } from '@/lib/contract-policy';
 import { recomputeVehicleEventConflicts } from '@/lib/event-conflicts';
 import { findLicenseForAction, retentionExpiry, type LicenseLike } from '@/lib/license-policy';
 import { rateLimit } from '@/lib/rate-limit';
+import { attributeCapability, filterProviderResultByCapabilities } from '@/lib/providers/capability-filter';
 import { groupAttributeConflicts } from '@/lib/providers/conflicts';
 import { coverageForCapability, evaluateProviderEligibility, type CapabilityEligibilityDecision } from '@/lib/providers/eligibility';
 import { selectProviders } from '@/lib/providers/registry';
 import type {
-  ProviderAttribute,
   ProviderCapability,
   ProviderCoverageDefinition,
   ProviderEvent,
@@ -144,11 +144,34 @@ async function persistProviderResult(
   mappingVersion: string | null
 ) {
   const rawExpiresAt = retentionExpiry(storageLicense);
-  const attributeWrites = result.attributes.map((attribute) => db.vehicleAttribute.upsert({
-    where: { vehicleId_sourceId_field: { vehicleId, sourceId, field: attribute.field } },
-    update: { value: attribute.value, sourceField: attribute.sourceField, rawValue: attribute.rawValue ?? attribute.value, quality: attribute.quality, mappingVersion, fetchedAt: attribute.fetchedAt },
-    create: { vehicleId, sourceId, field: attribute.field, value: attribute.value, sourceField: attribute.sourceField, rawValue: attribute.rawValue ?? attribute.value, quality: attribute.quality, mappingVersion, fetchedAt: attribute.fetchedAt }
-  }));
+  const attributeWrites = result.attributes.flatMap((attribute) => {
+    const capability = attributeCapability(attribute);
+    if (!capability) return [];
+    return [db.vehicleAttribute.upsert({
+      where: { vehicleId_sourceId_field: { vehicleId, sourceId, field: attribute.field } },
+      update: {
+        value: attribute.value,
+        sourceField: attribute.sourceField,
+        rawValue: attribute.rawValue ?? attribute.value,
+        capability,
+        quality: attribute.quality,
+        mappingVersion,
+        fetchedAt: attribute.fetchedAt
+      },
+      create: {
+        vehicleId,
+        sourceId,
+        field: attribute.field,
+        value: attribute.value,
+        sourceField: attribute.sourceField,
+        rawValue: attribute.rawValue ?? attribute.value,
+        capability,
+        quality: attribute.quality,
+        mappingVersion,
+        fetchedAt: attribute.fetchedAt
+      }
+    })];
+  });
   const eventWrites = result.events.map((event) => db.vehicleEvent.upsert({
     where: { sourceId_externalId: { sourceId, externalId: event.externalId } },
     update: {
@@ -299,38 +322,12 @@ export async function enforceProviderRateLimit(provider: VehicleDataProvider) {
   return { allowed: true, retryAfterSeconds: 0 };
 }
 
-function eventCapability(event: ProviderEvent): ProviderCapability | null {
-  if (event.eventType === 'ODOMETER_READING') return 'ODOMETER';
-  if (event.eventType === 'DAMAGE_RECORD') return 'DAMAGE';
-  if (event.eventType === 'INSPECTION') return 'INSPECTION';
-  if (event.eventType === 'REGISTRATION' || event.eventType === 'IMPORT_EXPORT') return 'REGISTRATION';
-  if (event.eventType === 'RECALL') return 'RECALLS';
-  return null;
-}
-
-function filterResultByCapabilities(result: ProviderLookupResult, capabilities: readonly ProviderCapability[]): ProviderLookupResult {
-  const allowed = new Set(capabilities);
-  const allowSpecs = allowed.has('VEHICLE_SPECS') || allowed.has('VIN_DECODE');
-  const events = result.events
-    .filter((event) => {
-      const capability = eventCapability(event);
-      return capability ? allowed.has(capability) : false;
-    })
-    .map((event) => {
-      if (event.eventType === 'INSPECTION' && !allowed.has('ODOMETER') && event.mileageKm != null) {
-        return { ...event, mileageKm: null, rawPayload: null };
-      }
-      return event;
-    });
-  return {
-    ...result,
-    attributes: allowSpecs ? result.attributes : [],
-    events
-  };
-}
-
 function mostRestrictiveRetentionLicense(licenses: LicenseLike[]): LicenseLike {
   return licenses.slice().sort((a, b) => (a.retentionDays ?? Number.MAX_SAFE_INTEGER) - (b.retentionDays ?? Number.MAX_SAFE_INTEGER))[0];
+}
+
+function hasProviderData(result: ProviderLookupResult): boolean {
+  return result.attributes.length > 0 || result.events.length > 0;
 }
 
 export async function runVehicleProviders(
@@ -363,15 +360,20 @@ export async function runVehicleProviders(
     const startedMs = Date.now();
     const configuration = provider.configurationStatus?.() ?? { configured: true, missing: [] };
     const publicUse = (options.origin ?? 'PUBLIC_LOOKUP') === 'PUBLIC_LOOKUP' || options.origin === 'REPORT_PURCHASE';
-    const rightsAction = publicUse ? 'COMMERCIALIZE' : 'STORE';
     const hasRequiredLicenseByCapability: Partial<Record<ProviderCapability, boolean>> = {};
     const hasRequiredContractByCapability: Partial<Record<ProviderCapability, boolean>> = {};
     const lastSuccessfulAtByCapability: Partial<Record<ProviderCapability, Date | null>> = {};
+    const commercialLicenseByCapability = new Map<ProviderCapability, LicenseLike>();
+    const storeLicenseByCapability = new Map<ProviderCapability, LicenseLike>();
 
     for (const capability of requestedCapabilities) {
       const coverage = coverageForCapability(operationalProvider, market, capability);
       const policyScope = { market, capability };
-      hasRequiredLicenseByCapability[capability] = Boolean(findLicenseForAction(source.licenses, rightsAction, startedAt, policyScope));
+      const commercialLicense = findLicenseForAction(source.licenses, 'COMMERCIALIZE', startedAt, policyScope);
+      const storeLicense = findLicenseForAction(source.licenses, 'STORE', startedAt, policyScope);
+      if (commercialLicense) commercialLicenseByCapability.set(capability, commercialLicense);
+      if (storeLicense) storeLicenseByCapability.set(capability, storeLicense);
+      hasRequiredLicenseByCapability[capability] = publicUse ? Boolean(commercialLicense || storeLicense) : Boolean(storeLicense);
       hasRequiredContractByCapability[capability] = hasActiveContract(source.contracts, startedAt, policyScope);
       lastSuccessfulAtByCapability[capability] = await latestSuccessfulScope(
         source.id,
@@ -433,38 +435,64 @@ export async function runVehicleProviders(
     }
 
     const eligibleCapabilities = eligibility.eligibleCapabilities;
-    const storeLicenses = eligibleCapabilities.map((capability) => findLicenseForAction(source.licenses, 'STORE', startedAt, { market, capability }));
-    const canStore = storeLicenses.length > 0 && storeLicenses.every(Boolean);
+    const storeCapabilities = eligibleCapabilities.filter((capability) => storeLicenseByCapability.has(capability));
+    const visibleCapabilities = publicUse
+      ? eligibleCapabilities.filter((capability) => commercialLicenseByCapability.has(capability))
+      : eligibleCapabilities;
 
     try {
-      const rawResult = await provider.lookup(vin, { canStore, now: startedAt, market, capabilities: eligibleCapabilities });
-      const result = filterResultByCapabilities(rawResult, eligibleCapabilities);
-      const availability = result.availability ?? (result.attributes.length > 0 || result.events.length > 0 ? 'DATA' : 'NO_DATA');
-      const mappingVersion = result.mappingVersion ?? provider.mappingVersion ?? 'unversioned';
+      const rawResult = await provider.lookup(vin, {
+        canStore: storeCapabilities.length > 0,
+        storeCapabilities,
+        now: startedAt,
+        market,
+        capabilities: eligibleCapabilities
+      });
+      const visibleResult = filterProviderResultByCapabilities(rawResult, visibleCapabilities);
+      const persistableResult = filterProviderResultByCapabilities(rawResult, storeCapabilities);
+      const actualResult = filterProviderResultByCapabilities(rawResult, eligibleCapabilities);
+      const outcomeStatus: 'SUCCESS' | 'NO_DATA' = hasProviderData(visibleResult) ? 'SUCCESS' : 'NO_DATA';
+      const providerRunStatus: 'SUCCESS' | 'NO_DATA' = hasProviderData(actualResult) ? 'SUCCESS' : 'NO_DATA';
+      const mappingVersion = rawResult.mappingVersion ?? provider.mappingVersion ?? 'unversioned';
       let persisted = false;
-      if (availability === 'DATA' && canStore) {
-        const license = mostRestrictiveRetentionLicense(storeLicenses.filter((item): item is NonNullable<typeof item> => Boolean(item)));
-        await persistProviderResult(vehicle.id, source.id, result, license, mappingVersion);
+      if (hasProviderData(persistableResult) && storeCapabilities.length > 0) {
+        const licenses = storeCapabilities
+          .map((capability) => storeLicenseByCapability.get(capability))
+          .filter((item): item is LicenseLike => Boolean(item));
+        const license = mostRestrictiveRetentionLicense(licenses);
+        await persistProviderResult(vehicle.id, source.id, persistableResult, license, mappingVersion);
         persisted = true;
       }
 
-      const runStatus: 'SUCCESS' | 'NO_DATA' = availability === 'DATA' ? 'SUCCESS' : 'NO_DATA';
-      const runScopes = eligibility.scopes.map((scope) => ({
-        capability: scope.capability,
-        status: scope.action === 'CALL' ? runStatus : capabilityStatus(scope),
-        reason: scope.action === 'CALL' ? 'ELIGIBLE' : scope.reason,
-        market: scopeMarket(market, scope.coverage),
-        mappingVersion: scope.action === 'CALL' ? (scope.coverage?.mappingVersion ?? mappingVersion) : scopeMappingVersion(provider, scope.coverage)
-      }));
+      const runScopes = eligibility.scopes.map((scope) => {
+        const scoped = scope.action === 'CALL' ? filterProviderResultByCapabilities(rawResult, [scope.capability]) : null;
+        const scopedStatus: 'SUCCESS' | 'NO_DATA' = scoped && hasProviderData(scoped) ? 'SUCCESS' : 'NO_DATA';
+        return {
+          capability: scope.capability,
+          status: scope.action === 'CALL' ? scopedStatus : capabilityStatus(scope),
+          reason: scope.action === 'CALL' ? 'ELIGIBLE' : scope.reason,
+          market: scopeMarket(market, scope.coverage),
+          mappingVersion: scope.action === 'CALL' ? (scope.coverage?.mappingVersion ?? mappingVersion) : scopeMappingVersion(provider, scope.coverage)
+        };
+      });
       const recorded = await recordRun({
-        sourceId: source.id, vin, status: runStatus, cached: result.cached, startedAt, startedMs, reason: 'ELIGIBLE', market,
+        sourceId: source.id, vin, status: providerRunStatus, cached: rawResult.cached, startedAt, startedMs, reason: 'ELIGIBLE', market,
         mappingVersion, scopes: runScopes
       });
       await markCoverageSuccessful(source.id, recorded.finishedAt, eligibility.scopes);
       outcomes.push({
-        providerKey: provider.key, providerName: provider.name, status: runStatus, cached: result.cached, persisted,
-        attributes: result.attributes, events: result.events, errorCode: null, decisionReason: 'ELIGIBLE', market,
-        mappingVersion, capabilities: eligibleCapabilities
+        providerKey: provider.key,
+        providerName: provider.name,
+        status: outcomeStatus,
+        cached: rawResult.cached,
+        persisted,
+        attributes: visibleResult.attributes,
+        events: visibleResult.events,
+        errorCode: null,
+        decisionReason: 'ELIGIBLE',
+        market,
+        mappingVersion,
+        capabilities: visibleCapabilities
       });
     } catch (error) {
       const code = errorCode(error);
@@ -479,7 +507,7 @@ export async function runVehicleProviders(
         sourceId: source.id, vin, status: 'FAILED', cached: false, startedAt, startedMs, reason: 'UPSTREAM_ERROR', market,
         mappingVersion: provider.mappingVersion ?? 'unversioned', errorCode: code, scopes: failedScopes
       });
-      outcomes.push({ providerKey: provider.key, providerName: provider.name, status: 'FAILED', cached: false, persisted: false, attributes: [], events: [], errorCode: code, decisionReason: 'UPSTREAM_ERROR', market, mappingVersion: provider.mappingVersion ?? null, capabilities: eligibleCapabilities });
+      outcomes.push({ providerKey: provider.key, providerName: provider.name, status: 'FAILED', cached: false, persisted: false, attributes: [], events: [], errorCode: code, decisionReason: 'UPSTREAM_ERROR', market, mappingVersion: provider.mappingVersion ?? null, capabilities: visibleCapabilities });
     }
   }
   return outcomes;

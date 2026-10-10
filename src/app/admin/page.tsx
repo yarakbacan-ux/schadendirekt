@@ -4,8 +4,10 @@ import { redirect } from 'next/navigation';
 import { DataQuality, Prisma, VehicleEventType } from '@prisma/client';
 import { db } from '@/lib/db';
 import { getSession, roleAllowed } from '@/lib/auth';
-import { hasActiveContract } from '@/lib/contract-policy';
+import { hasActiveContract, isContractReviewed } from '@/lib/contract-policy';
+import { getImportStorageHealth } from '@/lib/import-storage';
 import { analyzeMileage } from '@/lib/mileage-analysis';
+import { getRateLimitStoreHealth } from '@/lib/rate-limit';
 import { VEHICLE_EVENT_TYPES } from '@/lib/event-types';
 import { groupAttributeConflicts } from '@/lib/providers/conflicts';
 import { listProviders } from '@/lib/providers/registry';
@@ -52,7 +54,11 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
       },
       orderBy: { name: 'asc' }
     }),
-    db.importJob.findMany({ orderBy: { createdAt: 'desc' }, take: 10, include: { source: true } }),
+    db.importJob.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      include: { source: true, object: true, auditLogs: { orderBy: { createdAt: 'desc' }, take: 3 } }
+    }),
     db.vehicleEvent.findMany({
       where: eventWhere,
       orderBy: [{ eventDate: 'desc' }, { importedAt: 'desc' }],
@@ -77,6 +83,8 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
   const now = new Date();
   const lastDvsaBulk = dvsaImports.find((job) => /bulk/i.test(job.fileName ?? ''));
   const lastDvsaDelta = dvsaImports.find((job) => /delta/i.test(job.fileName ?? ''));
+  const rateLimitHealth = getRateLimitStoreHealth();
+  const importStorageHealth = getImportStorageHealth();
 
   const vehicleRows = vehicles.map((vehicle) => {
     const conflicts = groupAttributeConflicts(vehicle.attributes.map((attribute) => ({
@@ -103,6 +111,13 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
         <div><strong>{eventCount}</strong><span>Ereignisse</span></div>
         <div><strong>{registeredProviders.length}</strong><span>Provider</span></div>
         <div><strong>{conflictAttributeCount}</strong><span>Attributkonflikte</span></div>
+      </section>
+
+      <section className="resultCard">
+        <h2>Production Gates</h2>
+        <p>Shared Rate Limit: {rateLimitHealth.ok ? `OK · ${rateLimitHealth.mode}` : `NICHT BEREIT · ${rateLimitHealth.reason}`}</p>
+        <p>Import Object Storage: {importStorageHealth.ok ? `OK · ${importStorageHealth.provider}` : `NICHT BEREIT · ${importStorageHealth.reason}`}</p>
+        <p>In Produktion sind In-Memory-Rate-Limits und lokales Import-Dateisystem absichtlich nicht zulässig.</p>
       </section>
 
       <section className="resultCard">
@@ -141,7 +156,7 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
                 <p>Capabilities: {provider.capabilities.join(', ')}</p>
                 <p>Credentials: {configuration.configured ? 'CONFIGURED ✓' : `MISSING (${configuration.missing.join(', ')})`}</p>
                 <p>Lizenz: {requiresLicense ? `erforderlich · Store ${storeAllowed ? '✓' : '✗'} · Commercial ${commercialAllowed ? '✓' : '✗'}` : 'nicht als Coverage-Voraussetzung markiert'}</p>
-                <p>Vertrag: {requiresContract ? (contractActive ? 'AKTIV & geprüft ✓' : 'FEHLT / nicht aktiv ✗') : 'nicht erforderlich'}</p>
+                <p>Vertrag: {requiresContract ? (contractActive ? 'AKTIV & vollständig geprüft ✓' : 'FEHLT / Review unvollständig / nicht aktiv ✗') : 'nicht erforderlich'}</p>
                 <p>Refresh: {provider.refreshPolicy?.mode ?? 'LIVE'} / {provider.refreshPolicy?.maxAgeSeconds ? `${provider.refreshPolicy.maxAgeSeconds}s Default` : 'kein Provider-Default'} · Mapping: {provider.mappingVersion ?? '—'}</p>
                 <p>Letzter Lauf: {lastRun ? `${lastRun.status} · ${lastRun.decisionReason ?? lastRun.errorCode ?? 'OK'} · ${lastRun.finishedAt.toLocaleString('de-DE')}` : '—'} · Letzter erfolgreicher Providerkontakt: {lastSuccess ? lastSuccess.finishedAt.toLocaleString('de-DE') : '—'} · Fehlerrate letzte {runs.length}: {errorRate}%</p>
                 <p>Persistiert: {source?._count.vehicleAttributes ?? 0} Attribute · {source?._count.events ?? 0} Events</p>
@@ -190,14 +205,14 @@ export default async function AdminPage({ searchParams }: { searchParams: Promis
       <section className="reportGrid">
         <article className="resultCard reportPanel">
           <h2>Letzte Importjobs</h2>
-          {imports.length === 0 ? <p>Noch keine Importe.</p> : <div className="timeline">{imports.map((job) => <article key={job.id}><strong>{job.source.name}</strong><span>{job.status} · {job.format} · Mapping {job.mappingVersion}</span><p>{job.rowsRead} gelesen · {job.rowsValidated} validiert · {job.rowsWritten} geschrieben · {job.rowsFailed} fehlgeschlagen</p></article>)}</div>}
+          {imports.length === 0 ? <p>Noch keine Importe.</p> : <div className="timeline">{imports.map((job) => <article key={job.id}><strong>{job.source.name}</strong><span>{job.status} · {job.format} · Mapping {job.mappingVersion}</span><p>{job.rowsRead} gelesen · {job.rowsValidated} validiert · {job.rowsWritten} geschrieben · {job.rowsFailed} fehlgeschlagen</p><p>Rohdatei: {job.object ? `${job.object.sizeBytes.toString()} Bytes · ${job.object.deletedAt ? 'gelöscht' : `retained${job.object.expiresAt ? ` bis ${job.object.expiresAt.toLocaleString('de-DE')}` : ' ohne Ablaufdatum'}`}` : 'Legacy/keine Object-Datei'}{job.auditLogs[0] ? ` · letzter Audit: ${job.auditLogs[0].action}` : ''}</p></article>)}</div>}
         </article>
         <article className="resultCard reportPanel">
           <h2>Datenquellen, Rechte & Verträge</h2>
           <div className="timeline">{sources.map((source) => {
             const provider = providerByKey.get(source.key);
             const contractActive = hasActiveContract(source.contracts, now);
-            return <article key={source.id}><strong>{source.name}</strong><span>{source.key} · {source.active ? 'AKTIV' : 'INAKTIV'}{provider ? ' · PROVIDER' : ''}</span><p>{source.licenses.length === 0 ? 'Keine Lizenz dokumentiert.' : source.licenses.map((license) => `${license.licenseName}: Store ${license.canStore ? '✓' : '✗'}, Redistribute ${license.canRedistribute ? '✓' : '✗'}, Commercial ${license.canCommercialize ? '✓' : '✗'}, Retention ${license.retentionDays ?? '—'} Tage`).join(' · ')}</p><p>{source.contracts.length === 0 ? 'Kein Vertrag dokumentiert.' : `Verträge: ${source.contracts.map((contract) => `${contract.name} ${contract.active ? 'aktiv' : 'inaktiv'}${contract.reviewedAt ? ' / geprüft' : ' / ungeprüft'}`).join(' · ')} · wirksam jetzt: ${contractActive ? '✓' : '✗'}`}</p></article>;
+            return <article key={source.id}><strong>{source.name}</strong><span>{source.key} · {source.active ? 'AKTIV' : 'INAKTIV'}{provider ? ' · PROVIDER' : ''}</span><p>{source.licenses.length === 0 ? 'Keine Lizenz dokumentiert.' : source.licenses.map((license) => `${license.licenseName}: Store ${license.canStore ? '✓' : '✗'}, Redistribute ${license.canRedistribute ? '✓' : '✗'}, Commercial ${license.canCommercialize ? '✓' : '✗'}, Retention ${license.retentionDays ?? '—'} Tage`).join(' · ')}</p><p>{source.contracts.length === 0 ? 'Kein Vertrag dokumentiert.' : `Verträge: ${source.contracts.map((contract) => `${contract.name} ${contract.active ? 'aktiv' : 'inaktiv'} / ${isContractReviewed(contract) ? 'vollständig geprüft' : 'Review unvollständig'}`).join(' · ')} · wirksam jetzt: ${contractActive ? '✓' : '✗'}`}</p></article>;
           })}</div>
         </article>
       </section>

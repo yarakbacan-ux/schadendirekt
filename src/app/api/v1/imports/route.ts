@@ -1,6 +1,7 @@
 import { Readable } from 'node:stream';
 import { NextResponse } from 'next/server';
 import { queueImportStream } from '@/lib/imports';
+import { getImportMaxBytes } from '@/lib/import-storage';
 import { requestId, unexpectedApiError } from '@/lib/api-errors';
 import { requireRequestRole, verifyCsrf } from '@/lib/auth';
 
@@ -22,6 +23,17 @@ function requestBodyStream(request: Request): Readable {
   })());
 }
 
+function contentLengthTooLarge(request: Request, maxBytes: number): boolean {
+  const raw = request.headers.get('content-length');
+  if (!raw) return false;
+  try {
+    const value = BigInt(raw);
+    return value < 0n || value > BigInt(maxBytes);
+  } catch {
+    return true;
+  }
+}
+
 export async function POST(request: Request) {
   const id = requestId(request);
   try {
@@ -38,6 +50,11 @@ export async function POST(request: Request) {
     const format = contentType.includes('application/json') ? 'JSON' : contentType.includes('text/csv') ? 'CSV' : null;
     if (!format) return NextResponse.json({ error: 'UNSUPPORTED_MEDIA_TYPE', requestId: id }, { status: 415, headers: { 'x-request-id': id } });
 
+    const maxBytes = getImportMaxBytes();
+    if (contentLengthTooLarge(request, maxBytes)) {
+      return NextResponse.json({ error: 'IMPORT_TOO_LARGE', maxBytes: String(maxBytes), requestId: id }, { status: 413, headers: { 'x-request-id': id } });
+    }
+
     const job = await queueImportStream(
       sourceKey,
       requestBodyStream(request),
@@ -51,6 +68,7 @@ export async function POST(request: Request) {
         jobId: job.id,
         status: job.status,
         mappingVersion: job.mappingVersion,
+        sizeBytes: job.object?.sizeBytes?.toString() ?? null,
         queued: job.status === 'PENDING',
         requestId: id
       },
@@ -58,7 +76,10 @@ export async function POST(request: Request) {
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : 'IMPORT_QUEUE_FAILED';
-    if (message === 'INVALID_MAPPING_VERSION' || message === 'EMPTY_IMPORT_BODY' || message === 'CHECKSUM_MISMATCH') {
+    if (message === 'IMPORT_TOO_LARGE') {
+      return NextResponse.json({ error: message, requestId: id }, { status: 413, headers: { 'x-request-id': id } });
+    }
+    if (message === 'INVALID_MAPPING_VERSION' || message === 'EMPTY_IMPORT_BODY' || message === 'CHECKSUM_MISMATCH' || message === 'INVALID_IMPORT_MAX_BYTES') {
       return NextResponse.json({ error: message, requestId: id }, { status: 400, headers: { 'x-request-id': id } });
     }
     if (message.includes('LICENSED') || message.includes('RETENTION')) {

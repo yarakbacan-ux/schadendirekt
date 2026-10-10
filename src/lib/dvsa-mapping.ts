@@ -82,21 +82,21 @@ function testDescription(test: DvsaMotTest, defects: ReturnType<typeof normalize
 }
 
 function vehicleAttributes(vehicle: DvsaVehicle, fetchedAt: Date): ProviderAttribute[] {
-  const pairs: Array<[string, unknown, string]> = [
-    ['make', vehicle.make, 'make'],
-    ['model', vehicle.model, 'model'],
-    ['fuelType', vehicle.fuelType, 'fuelType'],
-    ['registration', vehicle.registration, 'registration'],
-    ['firstUsedDate', vehicle.firstUsedDate, 'firstUsedDate'],
-    ['registrationDate', vehicle.registrationDate, 'registrationDate'],
-    ['manufactureDate', vehicle.manufactureDate, 'manufactureDate'],
-    ['primaryColour', vehicle.primaryColour, 'primaryColour'],
-    ['secondaryColour', vehicle.secondaryColour, 'secondaryColour']
+  const pairs: Array<[string, unknown, string, 'VEHICLE_SPECS' | 'REGISTRATION']> = [
+    ['make', vehicle.make, 'make', 'VEHICLE_SPECS'],
+    ['model', vehicle.model, 'model', 'VEHICLE_SPECS'],
+    ['fuelType', vehicle.fuelType, 'fuelType', 'VEHICLE_SPECS'],
+    ['registration', vehicle.registration, 'registration', 'REGISTRATION'],
+    ['firstUsedDate', vehicle.firstUsedDate, 'firstUsedDate', 'REGISTRATION'],
+    ['registrationDate', vehicle.registrationDate, 'registrationDate', 'REGISTRATION'],
+    ['manufactureDate', vehicle.manufactureDate, 'manufactureDate', 'VEHICLE_SPECS'],
+    ['primaryColour', vehicle.primaryColour, 'primaryColour', 'VEHICLE_SPECS'],
+    ['secondaryColour', vehicle.secondaryColour, 'secondaryColour', 'VEHICLE_SPECS']
   ];
 
-  const attributes = pairs.flatMap(([field, raw, sourceField]) => {
+  const attributes = pairs.flatMap(([field, raw, sourceField, capability]) => {
     const value = clean(raw);
-    return value ? [{ field, value, sourceField, rawValue: value, quality: 'VERIFIED' as const, fetchedAt }] : [];
+    return value ? [{ field, value, sourceField, rawValue: value, capability, quality: 'VERIFIED' as const, fetchedAt }] : [];
   });
 
   const engineSize = clean(vehicle.engineSize);
@@ -108,6 +108,7 @@ function vehicleAttributes(vehicle: DvsaVehicle, fetchedAt: Date): ProviderAttri
         value: String(Math.round((cc / 1000) * 1000) / 1000),
         sourceField: 'engineSize',
         rawValue: engineSize,
+        capability: 'VEHICLE_SPECS',
         quality: 'VERIFIED',
         fetchedAt
       });
@@ -146,6 +147,16 @@ export function mapDvsaVehicle(vehicle: DvsaVehicle, fetchedAt = new Date()): Pr
         },
         defects,
         dataSource: clean(test.dataSource)
+      },
+      rawPayloadCapabilities: {
+        motTestNumber: 'INSPECTION',
+        completedDate: 'INSPECTION',
+        expiryDate: 'INSPECTION',
+        testResult: 'INSPECTION',
+        registrationAtTimeOfTest: 'REGISTRATION',
+        odometer: 'ODOMETER',
+        defects: 'INSPECTION',
+        dataSource: 'INSPECTION'
       }
     };
   });

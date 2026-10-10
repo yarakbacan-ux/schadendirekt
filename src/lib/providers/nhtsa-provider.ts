@@ -30,6 +30,7 @@ export const nhtsaProvider: VehicleDataProvider = {
         value: String(value),
         sourceField: NHTSA_FIELD_SOURCES[field],
         rawValue: String(value),
+        capability: 'VEHICLE_SPECS',
         quality: 'VERIFIED',
         fetchedAt
       }));

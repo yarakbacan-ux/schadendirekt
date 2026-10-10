@@ -4,14 +4,17 @@ import { db } from '@/lib/db';
 import { parseDvsaNdjsonChunks, type DvsaBulkRecord } from '@/lib/dvsa-bulk';
 import { mapDvsaVehicle } from '@/lib/dvsa-mapping';
 import { recomputeVehicleEventConflicts } from '@/lib/event-conflicts';
+import { attributeCapability, filterProviderResultByCapabilities } from '@/lib/providers/capability-filter';
 import { groupAttributeConflicts } from '@/lib/providers/conflicts';
 import { DVSA_MAPPING_VERSION, DVSA_SOURCE_KEY } from '@/lib/providers/dvsa-provider';
+import type { ProviderCapability } from '@/lib/providers/types';
 import { findLicenseForAction, retentionExpiry, type LicenseLike } from '@/lib/license-policy';
-import { getImportStorage, type ImportByteStream } from '@/lib/import-storage';
+import { getImportMaxBytes, getImportStorage, type ImportByteStream } from '@/lib/import-storage';
 import { cleanupExpiredRawData, processImportJob } from '@/lib/imports';
 import { isValidVin, normalizeVin } from '@/lib/vin';
 
 export const DVSA_IMPORT_FORMAT = 'DVSA_NDJSON';
+const DVSA_BULK_CAPABILITIES: readonly ProviderCapability[] = ['VEHICLE_SPECS', 'ODOMETER', 'INSPECTION', 'REGISTRATION'];
 
 const CANONICAL_FIELDS = new Set([
   'make', 'model', 'modelYear', 'bodyClass', 'fuelType', 'engineDisplacement',
@@ -28,6 +31,24 @@ function canonicalValue(field: string, value: string): string | number | null {
   if (!Number.isFinite(parsed)) return null;
   if (field === 'modelYear' && !Number.isInteger(parsed)) return null;
   return parsed;
+}
+
+function dvsaStoreLicenses(licenses: readonly LicenseLike[], at: Date) {
+  return DVSA_BULK_CAPABILITIES.map((capability) => ({
+    capability,
+    license: findLicenseForAction(licenses, 'STORE', at, { market: 'GB', capability })
+  }));
+}
+
+function mostRestrictiveLicense(rows: Array<{ capability: ProviderCapability; license: LicenseLike | null }>): LicenseLike | null {
+  if (rows.some((row) => !row.license)) return null;
+  return rows
+    .map((row) => row.license as LicenseLike)
+    .sort((a, b) => (a.retentionDays ?? Number.MAX_SAFE_INTEGER) - (b.retentionDays ?? Number.MAX_SAFE_INTEGER))[0] ?? null;
+}
+
+async function auditImport(importJobId: string, action: string, details?: Prisma.InputJsonValue) {
+  await db.importAuditLog.create({ data: { importJobId, action, details } });
 }
 
 async function recomputeCanonicalVehicle(vehicleId: string) {
@@ -75,36 +96,43 @@ async function replaceSourceSnapshot(
   sourceId: string,
   record: DvsaBulkRecord,
   storageLicense: LicenseLike,
+  storeCapabilities: readonly ProviderCapability[],
   mappingVersion: string,
   importedAt: Date
 ) {
-  const mapped = mapDvsaVehicle(record.vehicle, importedAt);
+  const mapped = filterProviderResultByCapabilities(mapDvsaVehicle(record.vehicle, importedAt), storeCapabilities);
   const rawExpiresAt = retentionExpiry(storageLicense, importedAt);
 
   await clearSourceSnapshot(vehicleId, sourceId);
 
-  const attributeWrites = mapped.attributes.map((attribute) => db.vehicleAttribute.upsert({
-    where: { vehicleId_sourceId_field: { vehicleId, sourceId, field: attribute.field } },
-    update: {
-      value: attribute.value,
-      sourceField: attribute.sourceField,
-      rawValue: attribute.rawValue ?? attribute.value,
-      quality: attribute.quality,
-      mappingVersion,
-      fetchedAt: attribute.fetchedAt
-    },
-    create: {
-      vehicleId,
-      sourceId,
-      field: attribute.field,
-      value: attribute.value,
-      sourceField: attribute.sourceField,
-      rawValue: attribute.rawValue ?? attribute.value,
-      quality: attribute.quality,
-      mappingVersion,
-      fetchedAt: attribute.fetchedAt
-    }
-  }));
+  const attributeWrites = mapped.attributes.flatMap((attribute) => {
+    const capability = attributeCapability(attribute);
+    if (!capability) return [];
+    return [db.vehicleAttribute.upsert({
+      where: { vehicleId_sourceId_field: { vehicleId, sourceId, field: attribute.field } },
+      update: {
+        value: attribute.value,
+        sourceField: attribute.sourceField,
+        rawValue: attribute.rawValue ?? attribute.value,
+        capability,
+        quality: attribute.quality,
+        mappingVersion,
+        fetchedAt: attribute.fetchedAt
+      },
+      create: {
+        vehicleId,
+        sourceId,
+        field: attribute.field,
+        value: attribute.value,
+        sourceField: attribute.sourceField,
+        rawValue: attribute.rawValue ?? attribute.value,
+        capability,
+        quality: attribute.quality,
+        mappingVersion,
+        fetchedAt: attribute.fetchedAt
+      }
+    })];
+  });
   const eventWrites = mapped.events.map((event) => db.vehicleEvent.upsert({
     where: { sourceId_externalId: { sourceId, externalId: event.externalId } },
     update: {
@@ -163,9 +191,12 @@ export async function queueDvsaBulkImportStream(
 
   const source = await db.dataSource.findUnique({ where: { key: sourceKey }, include: { licenses: true } });
   if (!source || !source.active) throw new Error('SOURCE_NOT_FOUND_OR_INACTIVE');
-  const license = findLicenseForAction(source.licenses, 'STORE', new Date(), { market: 'GB', capability: 'INSPECTION' });
-  if (!license) throw new Error('SOURCE_STORAGE_NOT_LICENSED');
-  if (license.retentionDays === 0) throw new Error('SOURCE_RETENTION_TOO_SHORT_FOR_ASYNC_IMPORT');
+  const licenseRows = dvsaStoreLicenses(source.licenses, new Date());
+  const archiveLicense = mostRestrictiveLicense(licenseRows);
+  // A raw DVSA archive contains fields from every supported bulk capability. It is therefore
+  // retained only when STORE rights cover the complete raw archive, not merely one event type.
+  if (!archiveLicense) throw new Error('SOURCE_STORAGE_NOT_LICENSED_FOR_DVSA_ARCHIVE');
+  if (archiveLicense.retentionDays === 0) throw new Error('SOURCE_RETENTION_TOO_SHORT_FOR_ASYNC_IMPORT');
 
   const job = await db.importJob.create({
     data: {
@@ -181,7 +212,7 @@ export async function queueDvsaBulkImportStream(
   const key = objectKey(source.key, job.id);
 
   try {
-    const stored = await storage.putStream(key, stream);
+    const stored = await storage.putStream(key, stream, { maxBytes: getImportMaxBytes() });
     if (options.expectedChecksum && options.expectedChecksum !== stored.checksum) throw new Error('CHECKSUM_MISMATCH');
 
     const duplicate = await db.importJob.findFirst({
@@ -207,9 +238,9 @@ export async function queueDvsaBulkImportStream(
           importJobId: job.id,
           provider: stored.provider,
           storageKey: stored.key,
-          sizeBytes: stored.sizeBytes,
+          sizeBytes: BigInt(stored.sizeBytes),
           checksum: stored.checksum,
-          expiresAt: retentionExpiry(license, job.createdAt)
+          expiresAt: retentionExpiry(archiveLicense, job.createdAt)
         }
       })
     ]);
@@ -232,6 +263,7 @@ async function applyRecord(
   record: DvsaBulkRecord,
   sourceId: string,
   license: LicenseLike,
+  storeCapabilities: readonly ProviderCapability[],
   mappingVersion: string,
   importedAt: Date
 ) {
@@ -261,7 +293,7 @@ async function applyRecord(
     return;
   }
 
-  await replaceSourceSnapshot(vehicle.id, sourceId, record, license, mappingVersion, importedAt);
+  await replaceSourceSnapshot(vehicle.id, sourceId, record, license, storeCapabilities, mappingVersion, importedAt);
   await db.sourceTombstone.deleteMany({ where: { sourceId, subjectKey } });
 }
 
@@ -299,6 +331,15 @@ async function claimPendingGenericJobs(limit: number): Promise<ClaimedJob[]> {
   `);
 }
 
+async function deleteDvsaObjectForPolicy(job: { id: string; object: { provider: string; storageKey: string; deletedAt: Date | null } }) {
+  if (job.object.deletedAt) return;
+  const storage = getImportStorage();
+  if (job.object.provider !== storage.provider) throw new Error('IMPORT_STORAGE_PROVIDER_UNAVAILABLE');
+  await storage.delete(job.object.storageKey);
+  await db.importObject.update({ where: { importJobId: job.id }, data: { deletedAt: new Date() } });
+  await auditImport(job.id, 'DELETE_POLICY', { reason: 'DVSA_ARCHIVE_RIGHTS_NOT_AVAILABLE' });
+}
+
 export async function processDvsaImportJob(jobId: string, batchSize = 250) {
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 10_000) throw new Error('INVALID_BATCH_SIZE');
   const job = await db.importJob.findUnique({
@@ -306,19 +347,25 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
     include: { object: true, source: { include: { licenses: true } } }
   });
   if (!job?.object) throw new Error('DVSA_IMPORT_OBJECT_NOT_FOUND');
+  const importObject = job.object;
+  if (importObject.deletedAt) throw new Error('DVSA_IMPORT_OBJECT_NOT_AVAILABLE');
   if (job.format !== DVSA_IMPORT_FORMAT) throw new Error('NOT_DVSA_IMPORT_JOB');
   if (job.status !== 'RUNNING') throw new Error('IMPORT_JOB_NOT_CLAIMED');
 
-  const license = findLicenseForAction(job.source.licenses, 'STORE', new Date(), { market: 'GB', capability: 'INSPECTION' });
-  if (!license) {
-    return db.importJob.update({
+  const licenseRows = dvsaStoreLicenses(job.source.licenses, new Date());
+  const archiveLicense = mostRestrictiveLicense(licenseRows);
+  if (!archiveLicense || archiveLicense.retentionDays === 0) {
+    const result = await db.importJob.update({
       where: { id: job.id },
-      data: { status: 'FAILED', finishedAt: new Date(), rowsFailed: 1, errorLog: [{ index: -1, message: 'SOURCE_STORAGE_NOT_LICENSED', rows: 1 }] }
+      data: { status: 'FAILED', finishedAt: new Date(), rowsFailed: 1, errorLog: [{ index: -1, message: 'SOURCE_STORAGE_NOT_LICENSED_FOR_DVSA_ARCHIVE', rows: 1 }] }
     });
+    await deleteDvsaObjectForPolicy({ id: job.id, object: importObject });
+    return result;
   }
 
+  const storeCapabilities = licenseRows.filter((row) => Boolean(row.license)).map((row) => row.capability);
   const storage = getImportStorage();
-  if (job.object.provider !== storage.provider) throw new Error('IMPORT_STORAGE_PROVIDER_UNAVAILABLE');
+  if (importObject.provider !== storage.provider) throw new Error('IMPORT_STORAGE_PROVIDER_UNAVAILABLE');
 
   let rowsRead = 0;
   let rowsValidated = 0;
@@ -333,7 +380,7 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
       try {
         validateRecord(record);
         rowsValidated += 1;
-        await applyRecord(record, job.sourceId, license, job.mappingVersion, job.createdAt);
+        await applyRecord(record, job.sourceId, archiveLicense, storeCapabilities, job.mappingVersion, job.createdAt);
         rowsWritten += 1;
       } catch (error) {
         errors.push({
@@ -346,7 +393,7 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
   };
 
   try {
-    const stream = await storage.openReadStream(job.object.storageKey);
+    const stream = await storage.openReadStream(importObject.storageKey);
     for await (const record of parseDvsaNdjsonChunks(stream)) {
       rowsRead += 1;
       batch.push(record);
@@ -381,9 +428,10 @@ export async function processDvsaImportJob(jobId: string, batchSize = 250) {
 export async function retryDvsaImportJob(jobId: string) {
   const job = await db.importJob.findUnique({ where: { id: jobId }, include: { object: true } });
   if (!job?.object || job.object.deletedAt) throw new Error('DVSA_IMPORT_OBJECT_NOT_AVAILABLE');
+  if (job.object.expiresAt && job.object.expiresAt <= new Date()) throw new Error('DVSA_IMPORT_OBJECT_EXPIRED');
   if (job.format !== DVSA_IMPORT_FORMAT) throw new Error('NOT_DVSA_IMPORT_JOB');
   if (job.status !== 'PARTIAL' && job.status !== 'FAILED') throw new Error('DVSA_IMPORT_NOT_RETRYABLE');
-  return db.importJob.update({
+  const result = await db.importJob.update({
     where: { id: job.id },
     data: {
       status: 'PENDING',
@@ -396,6 +444,8 @@ export async function retryDvsaImportJob(jobId: string) {
       finishedAt: null
     }
   });
+  await auditImport(job.id, 'RETRY', { retainedRawObject: true });
+  return result;
 }
 
 export async function processPendingImportJobsUnified(dvsaLimit = 2, genericLimit = 2, batchSize = 250) {
