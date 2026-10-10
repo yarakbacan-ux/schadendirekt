@@ -14,7 +14,7 @@ function normalizeToken(value: string, kind: PolicyScopeKind): string | null {
   if (!normalized) return null;
   if (normalized === '*') return '*';
   if (kind === 'capability') return CAPABILITIES.has(normalized) ? normalized : null;
-  // Operational provider markets are country codes. Do not accept aliases or arbitrary strings here.
+  // Operational provider markets are ISO-like two-letter country codes. Aliases are not accepted here.
   return /^[A-Z]{2}$/.test(normalized) ? normalized : null;
 }
 
@@ -36,12 +36,11 @@ export function parsePolicyScope(value: unknown, kind: PolicyScopeKind): ParsedP
 
 export function policyScopeAllows(value: unknown, requested: string | null | undefined, kind: PolicyScopeKind): boolean {
   const parsed = parsePolicyScope(value, kind);
+  const normalizedRequested = requested ? normalizeToken(requested, kind) : null;
+  if (requested && (!normalizedRequested || normalizedRequested === '*')) return false;
   if (parsed.mode === 'UNRESTRICTED') return true;
-  if (parsed.mode === 'DENY') return false;
-  if (!requested) return false;
-  const normalized = normalizeToken(requested, kind);
-  if (!normalized || normalized === '*') return false;
-  return parsed.values.has(normalized);
+  if (parsed.mode === 'DENY' || !normalizedRequested) return false;
+  return parsed.values.has(normalizedRequested);
 }
 
 export function isKnownProviderCapability(value: string): value is ProviderCapability {
