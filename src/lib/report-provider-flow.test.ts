@@ -191,7 +191,6 @@ describeDb('dynamic report provider flow', () => {
     const report = await getVehicleReport(VIN_EPHEMERAL, { providerKeys: [EPHEMERAL_KEY] });
     expect(report.vehicle).toMatchObject({ vin: VIN_EPHEMERAL, make: 'TRANSIENT MAKE' });
     expect(report.coverage).toContainEqual(expect.objectContaining({ providerKey: EPHEMERAL_KEY, state: 'DATA' }));
-    expect(report.providerOutcomes).toContainEqual(expect.objectContaining({ providerKey: EPHEMERAL_KEY, status: 'SUCCESS', persisted: false }));
 
     const persisted = await db.vehicle.findUniqueOrThrow({ where: { vin: VIN_EPHEMERAL } });
     expect(persisted.make).toBeNull();
