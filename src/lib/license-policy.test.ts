@@ -38,6 +38,17 @@ describe('license policy', () => {
     expect(permitsLicenseAction(scoped, 'COMMERCIALIZE', new Date('2026-10-08T00:00:00Z'), { market: 'GB', capability: 'DAMAGE' })).toBe(false);
   });
 
+  it('uses explicit fail-closed semantics for empty, malformed and unknown scopes', () => {
+    const at = new Date('2026-10-08T00:00:00Z');
+    expect(permitsLicenseAction({ ...base, markets: null, capabilities: null }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(true);
+    expect(permitsLicenseAction({ ...base, markets: ['*'], capabilities: ['*'] }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(true);
+    expect(permitsLicenseAction({ ...base, markets: [], capabilities: ['INSPECTION'] }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(false);
+    expect(permitsLicenseAction({ ...base, markets: ['DE'], capabilities: [] }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(false);
+    expect(permitsLicenseAction({ ...base, markets: 'DE' as unknown, capabilities: ['INSPECTION'] }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(false);
+    expect(permitsLicenseAction({ ...base, markets: ['DE'], capabilities: ['NOT_A_CAPABILITY'] }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(false);
+    expect(permitsLicenseAction({ ...base, markets: ['GERMANY'], capabilities: ['INSPECTION'] }, 'STORE', at, { market: 'DE', capability: 'INSPECTION' })).toBe(false);
+  });
+
   it('calculates retention expiry', () => {
     const expiry = retentionExpiry(base, new Date('2026-01-01T00:00:00Z'));
     expect(expiry?.toISOString()).toBe('2026-01-31T00:00:00.000Z');
