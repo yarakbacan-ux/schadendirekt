@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { S3CompatibleImportStorage } from './import-storage';
@@ -37,6 +38,11 @@ describeShared('real isolated shared backend smoke', () => {
       const object = await storage.put(key, 'shared-backend-smoke');
       expect(object.sizeBytes).toBe(Buffer.byteLength('shared-backend-smoke'));
       expect(await storage.readText(key)).toBe('shared-backend-smoke');
+      const streamed = await storage.putStream(key, Readable.from([Buffer.alloc(8 * 1024 * 1024, 97), 'tail']));
+      expect(streamed.sizeBytes).toBe(8 * 1024 * 1024 + 4);
+      const read = await storage.readText(key);
+      expect(read.length).toBe(streamed.sizeBytes);
+      expect(read.endsWith('tail')).toBe(true);
     } finally {
       await storage.delete(key);
     }

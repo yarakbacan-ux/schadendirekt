@@ -113,7 +113,7 @@ jobs:
           cache: false
       - name: Cache pinned official S3 tools
         id: s3-tools-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/s3-tools
           key: s3-tools-linux-go1.24.8-minio-9e49d5e-mc-20250813
@@ -162,6 +162,12 @@ jobs:
             playwright-report/
             test-results/
           retention-days: 7
+      - name: Save successfully built pinned S3 tools
+        if: always() && steps.s3-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/s3-tools
+          key: s3-tools-linux-go1.24.8-minio-9e49d5e-mc-20250813
       - name: Stop isolated object storage
         if: always()
         run: |

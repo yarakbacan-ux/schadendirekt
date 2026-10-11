@@ -48,19 +48,30 @@ describe('ImportStorage', () => {
 
   it('streams S3-compatible upload/download and deletes partial objects when the size limit is exceeded', async () => {
     const objects = new Map<string, Buffer>();
+    const uploads = new Map<string, Buffer[]>();
     const fetchImpl = async (input: URL | RequestInfo, init?: RequestInit) => {
       const url = new URL(String(input));
       const key = url.pathname;
+      if (init?.method === 'POST' && url.searchParams.has('uploads')) {
+        uploads.set(key, []);
+        return new Response('<InitiateMultipartUploadResult><UploadId>test-upload</UploadId></InitiateMultipartUploadResult>');
+      }
       if (init?.method === 'PUT') {
-        const chunks: Buffer[] = [];
-        const body = init.body as unknown as AsyncIterable<Uint8Array>;
-        for await (const chunk of body) chunks.push(Buffer.from(chunk));
-        objects.set(key, Buffer.concat(chunks));
-        return new Response('', { status: 200 });
+        const bytes = Buffer.from(init.body as unknown as Uint8Array);
+        expect(init.headers).toMatchObject({ 'content-length': String(bytes.byteLength) });
+        if (url.searchParams.has('partNumber')) uploads.get(key)!.push(bytes);
+        else objects.set(key, bytes);
+        return new Response('', { status: 200, headers: { etag: '"test-etag"' } });
+      }
+      if (init?.method === 'POST' && url.searchParams.has('uploadId')) {
+        objects.set(key, Buffer.concat(uploads.get(key)!));
+        uploads.delete(key);
+        return new Response('<CompleteMultipartUploadResult/>');
       }
       if (init?.method === 'DELETE') {
-        objects.delete(key);
-        return new Response('', { status: 204 });
+        if (url.searchParams.has('uploadId')) uploads.delete(key);
+        else objects.delete(key);
+        return new Response(null, { status: 204 });
       }
       if (init?.method === 'GET') {
         const value = objects.get(key);
@@ -79,9 +90,15 @@ describe('ImportStorage', () => {
 
     const stored = await storage.putStream('provider/job.ndjson', Readable.from(['ab', 'cd']), { maxBytes: 4 });
     expect(stored.sizeBytes).toBe(4);
+    expect(uploads.size).toBe(0);
     expect(await storage.readText(stored.key)).toBe('abcd');
 
     await expect(storage.putStream('provider/too-large.ndjson', Readable.from(['abc', 'de']), { maxBytes: 4 })).rejects.toThrow('IMPORT_TOO_LARGE');
     await expect(storage.readText('provider/too-large.ndjson')).rejects.toThrow('IMPORT_OBJECT_NOT_FOUND');
+    expect(uploads.size).toBe(0);
+    const large = await storage.putStream('provider/multipart', Readable.from([Buffer.alloc(8 * 1024 * 1024 + 1, 97)]));
+    expect(large.sizeBytes).toBe(8 * 1024 * 1024 + 1);
+    expect((await storage.readText(large.key)).length).toBe(large.sizeBytes);
+    expect(uploads.size).toBe(0);
   });
 });

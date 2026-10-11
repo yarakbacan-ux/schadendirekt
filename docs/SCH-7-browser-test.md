@@ -35,7 +35,11 @@ Admin-Login mit sicheren Cookies und persistenter DB-Session, CSRF-Abweisung, Lo
 sowie Import/Worker/BigInt/S3-Roundtrip/Retention/Audit. Test-Admins erhalten zufällige Passwörter.
 Importfixtures haben ausdrücklich keine Veröffentlichungs- oder kommerziellen Rechte,
 werden nie als echte Historie ausgegeben und werden wieder entfernt.
-NHTSA/DVSA-Rechte werden durch diese Tests nicht freigeschaltet.
+NHTSA/DVSA-Rechte werden durch diese Tests nicht freigeschaltet. Der S3-Treiber sendet
+kleine bekannte Objekte mit Content-Length und signiertem SHA-256. Unbekannt lange
+Import-Streams laufen als Multipart mit 8-MiB-Teilen, begrenztem Arbeitsspeicher, Größenlimit
+und Abbruch unvollständiger Uploads. Ein separater echter Backend-Smoke prüft auch
+einen Upload über mehrere Teile; keine Unsigned-Payload-Streams ohne Content-Length.
 
 ## Railway-Konfiguration (noch kein Deployment-Nachweis)
 
