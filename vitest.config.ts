@@ -8,6 +8,7 @@ export default defineConfig({
     }
   },
   test: {
-    environment: 'node'
+    environment: 'node',
+    exclude: ['tests/browser/**', '**/node_modules/**', '**/.next/**', '**/dist/**']
   }
 });

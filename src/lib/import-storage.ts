@@ -218,28 +218,102 @@ export class S3CompatibleImportStorage implements ImportStorage {
   }
 
   async put(key: string, content: string, options?: ImportWriteOptions): Promise<StoredImportObject> {
-    return this.putStream(key, Readable.from([content]), options);
+    const bytes = Buffer.from(content, 'utf8');
+    const maxBytes = checkedMaxBytes(options?.maxBytes);
+    if (maxBytes != null && bytes.byteLength > maxBytes) throw new Error('IMPORT_TOO_LARGE');
+    const checksum = checksumText(content);
+    const url = this.objectUrl(key);
+    const response = await this.fetchImpl(url, {
+      method: 'PUT',
+      headers: { ...this.signedHeaders('PUT', url, checksum), 'content-length': String(bytes.byteLength) },
+      body: bytes as unknown as BodyInit
+    });
+    if (!response.ok) throw new Error(`IMPORT_STORAGE_S3_PUT_${response.status}`);
+    return { provider: this.provider, key, sizeBytes: bytes.byteLength, checksum };
   }
 
   async putStream(key: string, content: ImportByteStream, options: ImportWriteOptions = {}): Promise<StoredImportObject> {
-    const url = this.objectUrl(key);
-    const hash = createHash('sha256');
+    // S3 requires known Content-Length or its special aws-chunked protocol.
+    // Multipart keeps unknown-length imports bounded to one 8 MiB part in memory.
+    const partSize = 8 * 1024 * 1024;
     const maxBytes = checkedMaxBytes(options.maxBytes);
+    const hash = createHash('sha256');
+    const emptyHash = sha256Hex('');
+    const base = this.objectUrl(key);
+    const initUrl = new URL(base);
+    initUrl.searchParams.set('uploads', '');
+    const initialized = await this.fetchImpl(initUrl, { method: 'POST', headers: this.signedHeaders('POST', initUrl, emptyHash) });
+    if (!initialized.ok) throw new Error(`IMPORT_STORAGE_S3_INIT_${initialized.status}`);
+    const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(await initialized.text())?.[1];
+    if (!uploadId) throw new Error('IMPORT_STORAGE_S3_UPLOAD_ID_MISSING');
+    const parts: Array<{ number: number; etag: string }> = [];
     let sizeBytes = 0;
-    const meter = meteredTransform(hash, maxBytes, (size) => { sizeBytes = size; });
-    const body = Readable.from(content).pipe(meter);
-    try {
-      const requestInit = {
+    let pendingChunks: Buffer[] = [];
+    let pendingBytes = 0;
+    const multipartUrl = () => {
+      const url = new URL(base);
+      url.searchParams.set('uploadId', uploadId);
+      return url;
+    };
+    const abort = async () => {
+      const url = multipartUrl();
+      const response = await this.fetchImpl(url, { method: 'DELETE', headers: this.signedHeaders('DELETE', url, emptyHash) });
+      if (!response.ok && response.status !== 404) throw new Error(`IMPORT_STORAGE_S3_ABORT_${response.status}`);
+    };
+    const uploadPart = async (bytes: Buffer) => {
+      if (parts.length >= 10_000) throw new Error('IMPORT_TOO_LARGE');
+      const number = parts.length + 1;
+      const url = multipartUrl();
+      url.searchParams.set('partNumber', String(number));
+      url.searchParams.sort();
+      const checksum = createHash('sha256').update(bytes).digest('hex');
+      const response = await this.fetchImpl(url, {
         method: 'PUT',
-        headers: this.signedHeaders('PUT', url, 'UNSIGNED-PAYLOAD'),
-        body,
-        duplex: 'half'
-      } as unknown as RequestInit;
-      const response = await this.fetchImpl(url, requestInit);
-      if (!response.ok) throw new Error(`IMPORT_STORAGE_S3_PUT_${response.status}`);
+        headers: { ...this.signedHeaders('PUT', url, checksum), 'content-length': String(bytes.byteLength) },
+        body: bytes as unknown as BodyInit
+      });
+      if (!response.ok) throw new Error(`IMPORT_STORAGE_S3_PART_${response.status}`);
+      const etag = response.headers.get('etag');
+      if (!etag) throw new Error('IMPORT_STORAGE_S3_ETAG_MISSING');
+      parts.push({ number, etag });
+    };
+    try {
+      for await (const chunk of content) {
+        const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk);
+        sizeBytes += bytes.byteLength;
+        if (maxBytes != null && sizeBytes > maxBytes) throw new Error('IMPORT_TOO_LARGE');
+        hash.update(bytes);
+        for (let offset = 0; offset < bytes.length;) {
+          const length = Math.min(partSize - pendingBytes, bytes.length - offset);
+          pendingChunks.push(bytes.subarray(offset, offset + length));
+          pendingBytes += length;
+          offset += length;
+          if (pendingBytes === partSize) {
+            await uploadPart(Buffer.concat(pendingChunks, pendingBytes));
+            pendingChunks = [];
+            pendingBytes = 0;
+          }
+        }
+      }
+      if (pendingBytes) await uploadPart(Buffer.concat(pendingChunks, pendingBytes));
+      if (parts.length === 0) {
+        await abort();
+        return this.put(key, '', options);
+      }
+      const escaped = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      const xml = `<CompleteMultipartUpload>${parts.map((part) => `<Part><PartNumber>${part.number}</PartNumber><ETag>${escaped(part.etag)}</ETag></Part>`).join('')}</CompleteMultipartUpload>`;
+      const url = multipartUrl();
+      const response = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: { ...this.signedHeaders('POST', url, sha256Hex(xml)), 'content-type': 'application/xml', 'content-length': String(Buffer.byteLength(xml)) },
+        body: xml
+      });
+      // S3 may return an embedded error even with HTTP 200 during completion.
+      const result = await response.text();
+      if (!response.ok || /<Error[>\s]/.test(result)) throw new Error(`IMPORT_STORAGE_S3_COMPLETE_${response.status}`);
       return { provider: this.provider, key, sizeBytes, checksum: hash.digest('hex') };
     } catch (error) {
-      await this.delete(key).catch(() => undefined);
+      await abort().catch(() => undefined);
       throw error;
     }
   }

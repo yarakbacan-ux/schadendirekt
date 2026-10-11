@@ -1,0 +1,12 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": { "builder": "RAILPACK", "buildCommand": "npm ci && npm run db:generate && npm run build" },
+  "deploy": {
+    "preDeployCommand": "npm run db:migrate",
+    "startCommand": "npm run start -- --hostname 0.0.0.0",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 120,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 3
+  }
+}

@@ -13,16 +13,22 @@
     "db:generate": "prisma generate",
     "user:create-admin": "node scripts/create-admin.mjs",
     "license:approve-nhtsa": "node scripts/approve-nhtsa-license.mjs",
-    "license:configure-dvsa": "node scripts/configure-dvsa-license.mjs"
+    "license:configure-dvsa": "node scripts/configure-dvsa-license.mjs",
+    "test:browser": "playwright test --config=playwright.config.cjs",
+    "typecheck": "tsc --noEmit",
+    "db:validate": "prisma validate",
+    "worker:once": "node scripts/worker-once.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.16.2",
     "next": "^16.4.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
+    "redis": "^6.3.0",
     "zod": "^4.1.11"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@types/node": "^22.18.6",
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.9",

@@ -1,3 +1,5 @@
+import { createClient } from 'redis';
+
 export type RateLimitResult = { allowed: boolean; retryAfterSeconds: number };
 
 type Bucket = { count: number; resetAt: number };
@@ -70,9 +72,38 @@ export class RedisRestEvalClient implements RedisEvalClient {
   }
 }
 
+// Native Railway Redis uses RESP/TCP, rather than a Redis REST gateway.
+export class RedisTcpEvalClient implements RedisEvalClient {
+  private client: ReturnType<typeof createClient> | null = null;
+  private connecting: Promise<unknown> | null = null;
+
+  constructor(private readonly url: string) {}
+
+  async eval(script: string, keys: string[], args: string[]): Promise<number[]> {
+    if (!this.client) {
+      this.client = createClient({
+        url: this.url,
+        disableOfflineQueue: true,
+        socket: { connectTimeout: 3000, reconnectStrategy: false }
+      });
+      // Redis emits socket errors; callers receive a rejected command instead.
+      this.client.on('error', () => undefined);
+    }
+    if (!this.client.isOpen && !this.connecting) {
+      this.connecting = this.client.connect().finally(() => { this.connecting = null; });
+    }
+    if (this.connecting) await this.connecting;
+    const result = await this.client.withCommandOptions({ timeout: 5000 }).eval(script, { keys, arguments: args });
+    if (!Array.isArray(result) || result.length !== 2 || result.some((value) => typeof value !== 'number')) {
+      throw new Error('REDIS_RATE_LIMIT_INVALID_RESPONSE');
+    }
+    return result as number[];
+  }
+}
+
 export type RateLimitStoreHealth = {
   ok: boolean;
-  mode: 'memory' | 'redis-rest' | 'unavailable';
+  mode: 'memory' | 'redis-rest' | 'redis-tcp' | 'unavailable';
   reason: string | null;
 };
 
@@ -84,6 +115,12 @@ export function createRateLimitStoreFromEnv(env: NodeJS.ProcessEnv = process.env
   if (mode === 'memory') {
     if (production) throw new Error('RATE_LIMIT_SHARED_STORE_REQUIRED');
     return new InMemoryRateLimitStore();
+  }
+
+  if (mode === 'redis-tcp') {
+    const url = env.REDIS_URL?.trim();
+    if (!url || !/^rediss?:\/\//.test(url)) throw new Error('RATE_LIMIT_REDIS_CONFIG_MISSING');
+    return new RedisRateLimitStore(new RedisTcpEvalClient(url));
   }
 
   if (mode === 'redis' || mode === 'redis-rest') {
@@ -112,7 +149,7 @@ export function getRateLimitStoreHealth(env: NodeJS.ProcessEnv = process.env): R
   try {
     const configured = env.RATE_LIMIT_STORE?.trim().toLowerCase();
     createRateLimitStoreFromEnv(env);
-    return { ok: true, mode: configured === 'redis' || configured === 'redis-rest' ? 'redis-rest' : 'memory', reason: null };
+    return { ok: true, mode: configured === 'redis-tcp' ? 'redis-tcp' : configured === 'redis' || configured === 'redis-rest' ? 'redis-rest' : 'memory', reason: null };
   } catch (error) {
     return {
       ok: false,

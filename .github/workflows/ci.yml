@@ -45,11 +45,17 @@ jobs:
       - name: Verify dependency audit
         run: npm audit --audit-level=moderate
 
+      - name: Validate Prisma schema
+        run: npm run db:validate
+
       - name: Generate Prisma client
         run: npm run db:generate
 
       - name: Apply database migrations
         run: npm run db:migrate
+
+      - name: Verify migration state
+        run: npx prisma migrate status
 
       - name: Run tests
         run: npm test
@@ -59,3 +65,110 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  browser:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: schadendirekt_e2e
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U postgres -d schadendirekt_e2e"
+          --health-interval=5s --health-timeout=5s --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=10
+    # Disposable local CI credentials; no staging credentials or real data.
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/schadendirekt_e2e?schema=public
+      WORKER_TOKEN: ci-isolated-worker-token
+      RATE_LIMIT_STORE: redis-tcp
+      REDIS_URL: redis://127.0.0.1:6379
+      IMPORT_STORAGE_DRIVER: s3
+      IMPORT_STORAGE_S3_ENDPOINT: http://127.0.0.1:9000
+      IMPORT_STORAGE_S3_REGION: us-east-1
+      IMPORT_STORAGE_S3_BUCKET: browser-imports
+      IMPORT_STORAGE_S3_ACCESS_KEY_ID: ci-minio-user
+      IMPORT_STORAGE_S3_SECRET_ACCESS_KEY: ci-isolated-minio-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Setup Go for pinned official MinIO source build
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.8'
+          cache: false
+      - name: Cache pinned official S3 tools
+        id: s3-tools-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/s3-tools
+          key: s3-tools-linux-go1.24.8-minio-9e49d5e-mc-20250813
+      - name: Build isolated S3 tools from official pinned sources
+        if: steps.s3-tools-cache.outputs.cache-hit != 'true'
+        env:
+          GOBIN: ${{ runner.temp }}/s3-tools
+        run: |
+          go install github.com/minio/minio@9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
+          go install github.com/minio/mc@RELEASE.2025-08-13T08-35-41Z
+      - name: Start isolated S3-compatible storage
+        run: |
+          mkdir -p "$RUNNER_TEMP/s3-data"
+          MINIO_ROOT_USER="$IMPORT_STORAGE_S3_ACCESS_KEY_ID" \
+          MINIO_ROOT_PASSWORD="$IMPORT_STORAGE_S3_SECRET_ACCESS_KEY" \
+            "$RUNNER_TEMP/s3-tools/minio" server "$RUNNER_TEMP/s3-data" --address 127.0.0.1:9000 \
+            > "$RUNNER_TEMP/minio.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/minio.pid"
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:9000/minio/health/ready; then break; fi
+            sleep 1
+          done
+          curl --fail http://127.0.0.1:9000/minio/health/ready
+          "$RUNNER_TEMP/s3-tools/mc" alias set e2e http://127.0.0.1:9000 "$IMPORT_STORAGE_S3_ACCESS_KEY_ID" "$IMPORT_STORAGE_S3_SECRET_ACCESS_KEY"
+          "$RUNNER_TEMP/s3-tools/mc" mb e2e/browser-imports
+      - name: Validate Prisma and migrate fresh browser database
+        run: |
+          npm run db:validate
+          npm run db:generate
+          npm run db:migrate
+          npx prisma migrate status
+      - name: Verify real shared backends before browser tests
+        run: RUN_SHARED_BACKEND_SMOKE=1 npx vitest run src/lib/shared-backends.integration.test.ts
+      - name: Install Chromium and system dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Build production application
+        run: npm run build
+      - name: Run browser and import-worker smoke tests
+        run: npm run test:browser
+      - name: Upload browser results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-results
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+      - name: Save successfully built pinned S3 tools
+        if: always() && steps.s3-tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/s3-tools
+          key: s3-tools-linux-go1.24.8-minio-9e49d5e-mc-20250813
+      - name: Stop isolated object storage
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/minio.pid" ]; then kill "$(cat "$RUNNER_TEMP/minio.pid")"; fi

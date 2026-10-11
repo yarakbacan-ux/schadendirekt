@@ -133,4 +133,26 @@ describeDb('import hardening', () => {
 
     await db.vehicle.delete({ where: { id: vehicle.id } });
   });
+  it('does not mark retention deletion complete when object storage rejects deletion', async () => {
+    const source = await createSource('retention-failure');
+    class FailingDeleteStorage extends MemoryImportStorage {
+      failDeletion = true;
+      override async delete(key: string) {
+        if (this.failDeletion) throw new Error('S3_UNAVAILABLE');
+        await super.delete(key);
+      }
+    }
+    const storage = new FailingDeleteStorage();
+    setImportStorageForTests(storage);
+    const job = await queueImport(source.key, '[]', 'JSON');
+    const future = new Date(Date.now() + 2 * 86_400_000);
+    await expect(cleanupExpiredRawData(future)).rejects.toThrow('S3_UNAVAILABLE');
+    expect((await db.importObject.findUniqueOrThrow({ where: { importJobId: job.id } })).deletedAt).toBeNull();
+    expect(await db.importAuditLog.count({ where: { importJobId: job.id, action: 'DELETE_RETENTION' } })).toBe(0);
+    storage.failDeletion = false;
+    await cleanupExpiredRawData(future);
+    expect((await db.importObject.findUniqueOrThrow({ where: { importJobId: job.id } })).deletedAt).not.toBeNull();
+    expect(await db.importAuditLog.count({ where: { importJobId: job.id, action: 'DELETE_RETENTION' } })).toBe(1);
+  });
+
 });

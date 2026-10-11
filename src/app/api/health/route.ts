@@ -1,0 +1,138 @@
+import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
+import { NextResponse } from 'next/server';
+import { listProviders } from '@/lib/providers/registry';
+import { db } from '@/lib/db';
+import { getRateLimitStoreHealth, getRateLimitStore } from '@/lib/rate-limit';
+import { getImportStorageHealth, getImportStorage } from '@/lib/import-storage';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
+type Check = { ok: boolean; required?: boolean; mode?: string; provider?: string; connectivityVerified?: boolean; providers?: Array<{ key: string; configured: boolean }> };
+type Readiness = {
+  status: 'ready' | 'not_ready';
+  ready: boolean;
+  checks: {
+    app: Check;
+    database: Check;
+    schema: Check;
+    rateLimit: Check;
+    objectStorage: Check;
+    providerConfiguration: Check;
+  };
+};
+
+// Cache the remote probe to prevent each health poll from creating S3 objects.
+// Share concurrent requests in a single process; the probe remains fail-closed.
+let cached: { expires: number; result: Readiness } | null = null;
+let inFlight: Promise<Readiness> | null = null;
+
+async function checkReadiness(): Promise<Readiness> {
+  const checks: Readiness['checks'] = {
+    app: { ok: true },
+    database: { ok: false },
+    schema: { ok: false },
+    rateLimit: { ok: false },
+    objectStorage: { ok: false, connectivityVerified: false },
+    // Public NO_DATA flow must work without inventing provider rights.
+    providerConfiguration: {
+      ok: listProviders().every((provider) => provider.configurationStatus?.().configured ?? true),
+      required: false,
+      providers: listProviders().map((provider) => ({
+        key: provider.key, configured: provider.configurationStatus?.().configured ?? true
+      }))
+    }
+  };
+
+  try {
+    await db.$queryRaw`SELECT 1`;
+    checks.database.ok = true;
+    const tables = await db.$queryRaw<Array<{ user_table: string | null; migrations_table: string | null }>>`
+      SELECT to_regclass('public."User"')::text AS user_table,
+             to_regclass('public."_prisma_migrations"')::text AS migrations_table
+    `;
+    if (tables[0]?.user_table && tables[0]?.migrations_table) {
+      const models = Object.values(Prisma.ModelName);
+      const schema = await db.$queryRaw<Array<{ missing: bigint; failed: bigint; latest: boolean }>>`
+        SELECT
+          (SELECT count(*) FROM unnest(${models}::text[]) AS model(name)
+           WHERE to_regclass('public.' || quote_ident(name)) IS NULL) AS missing,
+          (SELECT count(*) FROM "_prisma_migrations"
+           WHERE finished_at IS NULL AND rolled_back_at IS NULL) AS failed,
+          EXISTS (SELECT 1 FROM "_prisma_migrations"
+                  WHERE migration_name = '20261010000000_phase4_4_production_hardening'
+                    AND finished_at IS NOT NULL AND rolled_back_at IS NULL) AS latest
+      `;
+      checks.schema.ok = Boolean(schema[0]?.latest && schema[0].missing === 0n && schema[0].failed === 0n);
+    }
+  } catch {
+    // Do not expose connection details.
+  }
+
+  const rateLimitConfig = getRateLimitStoreHealth();
+  checks.rateLimit.mode = rateLimitConfig.mode;
+  if (rateLimitConfig.ok) {
+    try {
+      await getRateLimitStore().consume('health:readiness', 1000, 60_000);
+      checks.rateLimit.ok = true;
+    } catch {
+      // Unavailable shared store fails readiness.
+    }
+  }
+
+  const storageConfig = getImportStorageHealth();
+  checks.objectStorage.provider = storageConfig.provider;
+  if (storageConfig.ok) {
+    const storage = getImportStorage();
+    const key = `health/readiness/${randomUUID()}.txt`;
+    const marker = randomUUID();
+    try {
+      await storage.put(key, marker, { maxBytes: 128 });
+      const stored = await storage.readText(key);
+      checks.objectStorage.ok = stored === marker;
+      checks.objectStorage.connectivityVerified = checks.objectStorage.ok;
+    } catch {
+      // Configuration alone is never treated as connectivity.
+    } finally {
+      try {
+        await storage.delete(key);
+      } catch {
+        // Failed cleanup also fails readiness.
+        checks.objectStorage.ok = false;
+        checks.objectStorage.connectivityVerified = false;
+      }
+    }
+  }
+
+  const ready = Object.values(checks).every((check) => check.required === false || check.ok);
+  return { status: ready ? 'ready' : 'not_ready', ready, checks };
+}
+
+export async function GET() {
+  const now = Date.now();
+  if (!cached || cached.expires <= now) {
+    if (!inFlight) {
+      inFlight = checkReadiness()
+        .then((result) => {
+          cached = { result, expires: Date.now() + 60_000 };
+          return result;
+        })
+        .finally(() => { inFlight = null; });
+    }
+    try {
+      await inFlight;
+    } catch {
+      // Unexpected probe failure remains unavailable, without leaking secrets.
+      return NextResponse.json({ status: 'not_ready', ready: false }, {
+        status: 503, headers: { 'cache-control': 'no-store' }
+      });
+    }
+  }
+
+  const result = cached!.result;
+  return NextResponse.json(result, {
+    status: result.ready ? 200 : 503,
+    headers: { 'cache-control': 'no-store' }
+  });
+}

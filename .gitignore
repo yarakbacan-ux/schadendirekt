@@ -6,3 +6,7 @@ coverage
 *.log
 .DS_Store
 prisma/dev.db
+node_modules/
+playwright-report/
+test-results/
+*.tsbuildinfo
