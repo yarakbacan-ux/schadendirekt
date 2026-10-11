@@ -9,13 +9,13 @@ module.exports = defineConfig({
   retries: 0,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
-    baseURL: 'http://127.0.0.1:3000',
+    baseURL: 'http://localhost:3000',
     trace: 'retain-on-failure'
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
-    command: 'npm run start -- --hostname 127.0.0.1 --port 3000',
-    url: 'http://127.0.0.1:3000',
+    command: 'npm run start -- --hostname localhost --port 3000',
+    url: 'http://localhost:3000',
     timeout: 120_000,
     reuseExistingServer: false,
     env: { NODE_ENV: 'production' }

@@ -27,7 +27,7 @@ npm run test:browser
 
 Alle CI-Umgebungsvariablen des Browser-Jobs vorher lokal setzen. Produktionsmodus verwendet
 niemals In-Memory-Rate-Limits oder lokales Import-Storage. Playwright startet eine eigene App
-auf `http://127.0.0.1:3000`; es verbindet sich nicht mit einer vorhandenen Staging-Instanz.
+auf `http://localhost:3000`; es verbindet sich nicht mit einer vorhandenen Staging-Instanz.
 
 Die sechs Browser-Tests prüfen FIN-Fehler, NO_DATA mit ausdrücklichem Unfallfreiheitsvorbehalt,
 leeren Bericht, Health/Schema/Redis/S3, anonymen Zugriff und falsches Passwort,

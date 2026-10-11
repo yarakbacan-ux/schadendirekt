@@ -111,7 +111,14 @@ jobs:
         with:
           go-version: '1.24.8'
           cache: false
+      - name: Cache pinned official S3 tools
+        id: s3-tools-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/s3-tools
+          key: s3-tools-linux-go1.24.8-minio-9e49d5e-mc-20250813
       - name: Build isolated S3 tools from official pinned sources
+        if: steps.s3-tools-cache.outputs.cache-hit != 'true'
         env:
           GOBIN: ${{ runner.temp }}/s3-tools
         run: |
@@ -138,6 +145,8 @@ jobs:
           npm run db:generate
           npm run db:migrate
           npx prisma migrate status
+      - name: Verify real shared backends before browser tests
+        run: RUN_SHARED_BACKEND_SMOKE=1 npx vitest run src/lib/shared-backends.integration.test.ts
       - name: Install Chromium and system dependencies
         run: npx playwright install --with-deps chromium
       - name: Build production application

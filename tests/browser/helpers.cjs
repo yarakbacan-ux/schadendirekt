@@ -31,7 +31,7 @@ async function login(page, admin) {
 
 async function csrfHeaders(context) {
   const cookies = await context.cookies();
-  return { origin: 'http://127.0.0.1:3000', 'x-csrf-token': cookies.find((c) => c.name === 'sd_csrf').value };
+  return { origin: 'http://localhost:3000', 'x-csrf-token': cookies.find((c) => c.name === 'sd_csrf').value };
 }
 
 async function readS3Object(key) {
