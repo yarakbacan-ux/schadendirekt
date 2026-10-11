@@ -1,7 +1,8 @@
 import { randomBytes, scryptSync } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 
-const [emailArg, password] = process.argv.slice(2);
+const [emailArg, passwordArg] = process.argv.slice(2);
+const password = process.env.ADMIN_BOOTSTRAP_PASSWORD || passwordArg;
 const email = emailArg?.trim().toLowerCase();
 if (!email || !password || password.length < 12) {
   console.error('Usage: npm run user:create-admin -- admin@example.com "minimum-12-char-password"');

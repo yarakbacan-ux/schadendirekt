@@ -57,4 +57,11 @@ describe('RateLimitStore', () => {
       REDIS_REST_TOKEN: 'test-only-token'
     })).toBeInstanceOf(RedisRateLimitStore);
   });
+  it('supports native Railway Redis without allowing a production memory fallback', () => {
+    expect(() => createRateLimitStoreFromEnv({ NODE_ENV: 'production', RATE_LIMIT_STORE: 'redis-tcp' })).toThrow('RATE_LIMIT_REDIS_CONFIG_MISSING');
+    expect(getRateLimitStoreHealth({ NODE_ENV: 'production', RATE_LIMIT_STORE: 'redis-tcp', REDIS_URL: 'redis://127.0.0.1:6379' }))
+      .toEqual({ ok: true, mode: 'redis-tcp', reason: null });
+    expect(() => createRateLimitStoreFromEnv({ NODE_ENV: 'production', RATE_LIMIT_STORE: 'memory' })).toThrow('RATE_LIMIT_SHARED_STORE_REQUIRED');
+  });
+
 });

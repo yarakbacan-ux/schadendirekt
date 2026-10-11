@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { NextResponse } from 'next/server';
+import { listProviders } from '@/lib/providers/registry';
 import { db } from '@/lib/db';
 import { getRateLimitStoreHealth, getRateLimitStore } from '@/lib/rate-limit';
 import { getImportStorageHealth, getImportStorage } from '@/lib/import-storage';
@@ -7,7 +9,7 @@ import { getImportStorageHealth, getImportStorage } from '@/lib/import-storage';
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-type Check = { ok: boolean; mode?: string; provider?: string; connectivityVerified?: boolean };
+type Check = { ok: boolean; required?: boolean; mode?: string; provider?: string; connectivityVerified?: boolean; providers?: Array<{ key: string; configured: boolean }> };
 type Readiness = {
   status: 'ready' | 'not_ready';
   ready: boolean;
@@ -34,7 +36,13 @@ async function checkReadiness(): Promise<Readiness> {
     rateLimit: { ok: false },
     objectStorage: { ok: false, connectivityVerified: false },
     // Public NO_DATA flow must work without inventing provider rights.
-    providerConfiguration: { ok: true }
+    providerConfiguration: {
+      ok: listProviders().every((provider) => provider.configurationStatus?.().configured ?? true),
+      required: false,
+      providers: listProviders().map((provider) => ({
+        key: provider.key, configured: provider.configurationStatus?.().configured ?? true
+      }))
+    }
   };
 
   try {
@@ -44,7 +52,20 @@ async function checkReadiness(): Promise<Readiness> {
       SELECT to_regclass('public."User"')::text AS user_table,
              to_regclass('public."_prisma_migrations"')::text AS migrations_table
     `;
-    checks.schema.ok = Boolean(tables[0]?.user_table && tables[0]?.migrations_table);
+    if (tables[0]?.user_table && tables[0]?.migrations_table) {
+      const models = Object.values(Prisma.ModelName);
+      const schema = await db.$queryRaw<Array<{ missing: bigint; failed: bigint; latest: boolean }>>`
+        SELECT
+          (SELECT count(*) FROM unnest(${models}::text[]) AS model(name)
+           WHERE to_regclass('public.' || quote_ident(name)) IS NULL) AS missing,
+          (SELECT count(*) FROM "_prisma_migrations"
+           WHERE finished_at IS NULL AND rolled_back_at IS NULL) AS failed,
+          EXISTS (SELECT 1 FROM "_prisma_migrations"
+                  WHERE migration_name = '20261010000000_phase4_4_production_hardening'
+                    AND finished_at IS NOT NULL AND rolled_back_at IS NULL) AS latest
+      `;
+      checks.schema.ok = Boolean(schema[0]?.latest && schema[0].missing === 0n && schema[0].failed === 0n);
+    }
   } catch {
     // Do not expose connection details.
   }
@@ -84,7 +105,7 @@ async function checkReadiness(): Promise<Readiness> {
     }
   }
 
-  const ready = Object.values(checks).every((check) => check.ok);
+  const ready = Object.values(checks).every((check) => check.required === false || check.ok);
   return { status: ready ? 'ready' : 'not_ready', ready, checks };
 }
 

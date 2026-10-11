@@ -390,7 +390,8 @@ export async function cleanupExpiredRawData(now = new Date()) {
   const storage = getImportStorage();
   for (const object of expiredObjects) {
     if (object.provider !== storage.provider) continue;
-    await storage.delete(object.storageKey).catch(() => undefined);
+    // Never claim deletion or emit a retention audit when the backend delete failed.
+    await storage.delete(object.storageKey);
     await db.importObject.update({ where: { id: object.id }, data: { deletedAt: now } });
     await auditImport(object.importJobId, 'DELETE_RETENTION', { details: { storage: object.provider } });
   }
