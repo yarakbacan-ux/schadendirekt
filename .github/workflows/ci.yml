@@ -69,7 +69,7 @@ jobs:
   browser:
     needs: verify
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16
@@ -106,21 +106,32 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Setup Go for pinned official MinIO source build
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.8'
+          cache: false
+      - name: Build isolated S3 tools from official pinned sources
+        env:
+          GOBIN: ${{ runner.temp }}/s3-tools
+        run: |
+          go install github.com/minio/minio@9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
+          go install github.com/minio/mc@RELEASE.2025-08-13T08-35-41Z
       - name: Start isolated S3-compatible storage
         run: |
-          docker run -d --name e2e-minio -p 127.0.0.1:9000:9000 \
-            -e MINIO_ROOT_USER="$IMPORT_STORAGE_S3_ACCESS_KEY_ID" \
-            -e MINIO_ROOT_PASSWORD="$IMPORT_STORAGE_S3_SECRET_ACCESS_KEY" \
-            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          mkdir -p "$RUNNER_TEMP/s3-data"
+          MINIO_ROOT_USER="$IMPORT_STORAGE_S3_ACCESS_KEY_ID" \
+          MINIO_ROOT_PASSWORD="$IMPORT_STORAGE_S3_SECRET_ACCESS_KEY" \
+            "$RUNNER_TEMP/s3-tools/minio" server "$RUNNER_TEMP/s3-data" --address 127.0.0.1:9000 \
+            > "$RUNNER_TEMP/minio.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/minio.pid"
           for attempt in $(seq 1 30); do
             if curl --silent --fail http://127.0.0.1:9000/minio/health/ready; then break; fi
             sleep 1
           done
           curl --fail http://127.0.0.1:9000/minio/health/ready
-          docker run --rm --network host --entrypoint /bin/sh \
-            -e IMPORT_STORAGE_S3_ACCESS_KEY_ID -e IMPORT_STORAGE_S3_SECRET_ACCESS_KEY \
-            minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
-            'mc alias set e2e http://127.0.0.1:9000 "$IMPORT_STORAGE_S3_ACCESS_KEY_ID" "$IMPORT_STORAGE_S3_SECRET_ACCESS_KEY" && mc mb e2e/browser-imports'
+          "$RUNNER_TEMP/s3-tools/mc" alias set e2e http://127.0.0.1:9000 "$IMPORT_STORAGE_S3_ACCESS_KEY_ID" "$IMPORT_STORAGE_S3_SECRET_ACCESS_KEY"
+          "$RUNNER_TEMP/s3-tools/mc" mb e2e/browser-imports
       - name: Validate Prisma and migrate fresh browser database
         run: |
           npm run db:validate
@@ -144,4 +155,5 @@ jobs:
           retention-days: 7
       - name: Stop isolated object storage
         if: always()
-        run: docker rm -f e2e-minio
+        run: |
+          if [ -f "$RUNNER_TEMP/minio.pid" ]; then kill "$(cat "$RUNNER_TEMP/minio.pid")"; fi

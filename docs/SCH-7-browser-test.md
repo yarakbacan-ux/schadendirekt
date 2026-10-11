@@ -59,7 +59,11 @@ Vor Aktivierung müssen folgende Punkte erfüllt sein:
 
 Kostenpflichtige Ressourcen werden nicht ohne erneute Zustimmung aktiviert. Zuerst Plan/Kosten
 klären, fehlende Persistenz/Secrets/Bucket konfigurieren und danach erst das vorgemerkte Deployment
-aktivieren. Keine Secrets in Repo, Linear oder PR-Kommentare schreiben. Keine Production-Gates lockern.
+aktivieren. Das vorgemerkte `minio/minio`-Image ist laut CI nicht mehr abrufbar. Stattdessen vor Aktivierung
+`deploy/minio.Dockerfile` aus dem offiziellen gepinnten Quellstand bauen und als eigene
+Service-Quelle konfigurieren. CI baut denselben MinIO-Quellstand und den offiziellen Client direkt
+mit Go; Go-Modul-Prüfsummen bleiben aktiv. Keine ungeprüften Drittanbieter-Images verwenden.
+Keine Secrets in Repo, Linear oder PR-Kommentare schreiben. Keine Production-Gates lockern.
 
 Health meldet App, DB, sämtliche Prisma-Modelltabellen, Migrationserfolg, echten Redis-Befehl
 und S3-Schreiben/Lesen/Löschen. Fehlende optionale Provider-Credentials werden separat gemeldet;
