@@ -14,7 +14,8 @@ test('admin rejects anonymous access and invalid credentials', async ({ page }) 
   await page.getByLabel('E-Mail', { exact: true }).fill(admin.email);
   await page.getByLabel('Passwort', { exact: true }).fill('incorrect-password');
   await page.getByRole('button', { name: 'Anmelden', exact: true }).click();
-  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page).toHaveURL(/\/admin\/login\?error=credentials$/);
+  await expect(page.getByRole('alert').filter({ hasText: 'Anmeldung fehlgeschlagen.' })).toBeVisible();
   expect(await db.session.count({ where: { userId: admin.user.id } })).toBe(0);
 });
 
